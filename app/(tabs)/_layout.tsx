@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Tabs, useRouter } from 'expo-router';
-import { View, Text, TouchableOpacity, Modal, StyleSheet, TouchableWithoutFeedback } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, StyleSheet, TouchableWithoutFeedback, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/context/ThemeContext';
 
@@ -16,20 +16,41 @@ export default function TabLayout() {
           headerStyle: { backgroundColor: theme.cardBg },
           headerTintColor: theme.text,
           headerTitleAlign: 'center',
-          // Header displays the WELEC brand plus the active screen title
-          headerTitle: () => (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={{ fontSize: 18, fontWeight: 'bold', color: theme.accent }}>⚡ WELEC</Text>
-              <Text style={{ fontSize: 16, fontWeight: '600', color: theme.text }}>
-                • {route.name === 'index' ? 'Dashboard' : route.name.toUpperCase()}
+
+          // 1. Left Side: Active Screen Name
+          headerLeft: () => {
+            let title = 'Dashboard';
+            if (route.name === 'crm') title = 'CRM Directory';
+            if (route.name === 'billing') title = 'Billing';
+            if (route.name === 'calendar') title = 'Calendar';
+            if (route.name === 'profile') title = 'Profile & Settings';
+
+            return (
+              <Text style={{ fontSize: 16, fontWeight: 'bold', color: theme.text, marginLeft: 16 }}>
+                {title}
               </Text>
+            );
+          },
+
+          // 2. Middle Center: Logo Image + WELEC ⚡
+          headerTitle: () => (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Image
+                source={require('../../assets/images/logo WELEC.jpg')}
+                style={{ width: 24, height: 24, borderRadius: 4 }}
+                resizeMode="contain"
+              />
+              <Text style={{ fontSize: 18, fontWeight: 'bold', color: theme.accent }}>WELEC ⚡</Text>
             </View>
           ),
+
+          // 3. Right Side: Profile Icon
           headerRight: () => (
-            <TouchableOpacity onPress={() => router.push('/profile')} style={{ marginRight: 16 }}>
-              <Ionicons name="person-circle-outline" size={26} color={theme.text} />
+            <TouchableOpacity onPress={() => router.push('/(tabs)/profile')} style={{ marginRight: 16 }}>
+              <Ionicons name="person-circle-outline" size={28} color={theme.text} />
             </TouchableOpacity>
           ),
+
           tabBarStyle: {
             backgroundColor: theme.cardBg,
             borderTopColor: theme.border,
@@ -89,6 +110,14 @@ export default function TabLayout() {
           options={{
             title: 'Calendar',
             tabBarIcon: ({ color, size }) => <Ionicons name="calendar-outline" size={size} color={color} />,
+          }}
+        />
+
+        {/* 4. Profile Screen inside Tabs (Hidden from Bottom Bar with href: null) */}
+        <Tabs.Screen
+          name="profile"
+          options={{
+            href: null, // Hides this route completely from bottom navbar!
           }}
         />
       </Tabs>
@@ -175,6 +204,7 @@ const styles = StyleSheet.create({
   actionTitle: { fontSize: 15, fontWeight: 'bold' },
   closeButton: { paddingVertical: 12, alignItems: 'center' },
 });
+
 
 /* to clear all  */
 // import React, { useState } from 'react';
