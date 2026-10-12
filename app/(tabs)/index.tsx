@@ -1,22 +1,28 @@
 import React from 'react';
-import { StyleSheet, View } from 'react-native';
-import ClientsScreen from '../../src/screens/ClientsScreen';
+import HomeScreen from '../../src/screens/HomeScreen';
 
-export default function TabOneScreen() {
-  return (
-    <View style={styles.container}>
-      {/* Render our custom electrical maintenance CRM client screen */}
-      <ClientsScreen />
-    </View>
-  );
+export default function DashboardTab() {
+  return <HomeScreen />;
 }
+// import React from 'react';
+// import { StyleSheet, View } from 'react-native';
+// import ClientsScreen from '../../src/screens/ClientsScreen';
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-  },
-});
+// export default function TabOneScreen() {
+//   return (
+//     <View style={styles.container}>
+//       {/* Render our custom electrical maintenance CRM client screen */}
+//       <ClientsScreen />
+//     </View>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: {
+//     flex: 1,
+//     backgroundColor: '#0f172a',
+//   },
+// });
 
 // import { StyleSheet } from 'react-native';
 
