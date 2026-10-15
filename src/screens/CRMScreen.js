@@ -17,6 +17,7 @@ import {
   deleteContact,
   getContactsByType,
 } from "../services/crmService";
+import ClientDetailScreen from './ClientDetailScreen';
 
 export default function CRMScreen() {
   const { theme } = useTheme();
@@ -31,6 +32,8 @@ export default function CRMScreen() {
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
   const [buildingType, setBuildingType] = useState("Residential");
+  //
+  const [selectedClient, setSelectedClient] = useState(null);
 
   const loadContacts = async () => {
     setLoading(true);
@@ -114,7 +117,9 @@ export default function CRMScreen() {
       (c.address &&
         c.address.toLowerCase().includes(searchQuery.toLowerCase())),
   );
-
+if (selectedClient) {
+  return <ClientDetailScreen client={selectedClient} onBack={() => setSelectedClient(null)} />;
+}
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Search Bar */}
@@ -382,9 +387,10 @@ export default function CRMScreen() {
                         borderColor: theme.border,
                       },
                     ]}
-                    onPress={() =>
-                      Alert.alert("Detail", "Full profile view coming up next!")
-                    }
+                    onPress={() => setSelectedClient(item)}
+                    // onPress={() =>
+                    //   Alert.alert("Detail", "Full profile view coming up next!")
+                    // }
                   >
                     <Text style={[styles.actionBtnText, { color: theme.text }]}>
                       Full Profile
