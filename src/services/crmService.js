@@ -65,3 +65,16 @@ export async function addJobLog(contactId, jobData) {
     return { success: false, error: error.message };
   }
 }
+
+export async function updateContact(contactId, updatedData) {
+  try {
+    const docRef = doc(db, 'contacts', contactId);
+    await updateDoc(docRef, {
+      ...updatedData,
+      updatedAt: new Date().toISOString(),
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
