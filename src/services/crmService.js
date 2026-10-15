@@ -78,3 +78,17 @@ export async function updateContact(contactId, updatedData) {
     return { success: false, error: error.message };
   }
 }
+
+
+export async function updateJobLog(contactId, jobId, updatedJobData) {
+  try {
+    const jobDocRef = doc(db, `contacts/${contactId}/jobLogs`, jobId);
+    await updateDoc(jobDocRef, {
+      ...updatedJobData,
+      updatedAt: new Date().toISOString(),
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
