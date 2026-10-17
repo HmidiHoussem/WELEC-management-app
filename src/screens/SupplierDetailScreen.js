@@ -2,7 +2,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Linking,
   Modal,
   SafeAreaView,
@@ -50,16 +49,25 @@ export default function SupplierDetailScreen({
   const [customCategory, setCustomCategory] = useState("");
   const [receiptDate, setReceiptDate] = useState("2026-10-15");
   const [receiptNotes, setReceiptNotes] = useState("");
+  const [initialPaidAmount, setInitialPaidAmount] = useState("");
 
-  // Detailed Items Table State
+  // Missing Receipt Number Web-Safe Warning Modal
+  const [showMissingNumberModal, setShowMissingNumberModal] = useState(false);
+
+  // Itemized Articles Table State
   const [items, setItems] = useState([
-    { id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 },
+    { id: "1", article: "", quantity: "1", unitPrice: "", totalHT: 0.0 },
   ]);
 
-  // Payment Status Modal State
+  // Payment Status & Add Partial Payment Modal State
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [selectedReceiptForStatus, setSelectedReceiptForStatus] =
     useState(null);
+  const [newPaymentInput, setNewPaymentInput] = useState("");
+  const [showPaymentInputBox, setShowPaymentInputBox] = useState(false);
+
+  // Inline Receipt Deletion State (Web & Mobile safe)
+  const [deletingReceiptId, setDeletingReceiptId] = useState(null);
 
   const loadReceipts = async () => {
     if (!supplier?.id) return;
@@ -68,7 +76,7 @@ export default function SupplierDetailScreen({
     if (res.success) {
       setReceipts(res.data);
     } else {
-      Alert.alert("Error", res.error);
+      console.error("Error loading receipts:", res.error);
     }
     setLoadingReceipts(false);
   };
@@ -77,7 +85,6 @@ export default function SupplierDetailScreen({
     loadReceipts();
   }, [supplier]);
 
-  // Open Add Receipt Modal
   const openNewReceiptModal = () => {
     setEditingReceiptId(null);
     setReceiptNumber("");
@@ -85,13 +92,13 @@ export default function SupplierDetailScreen({
     setCustomCategory("");
     setReceiptDate("2026-10-15");
     setReceiptNotes("");
+    setInitialPaidAmount("");
     setItems([
-      { id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 },
+      { id: "1", article: "", quantity: "1", unitPrice: "", totalHT: 0.0 },
     ]);
     setShowReceiptModal(true);
   };
 
-  // Open Edit Receipt Modal
   const openEditReceiptModal = (rec) => {
     setEditingReceiptId(rec.id);
     setReceiptNumber(rec.receiptNumber || "");
@@ -111,23 +118,36 @@ export default function SupplierDetailScreen({
     );
     setReceiptDate(rec.date || "2026-10-15");
     setReceiptNotes(rec.notes || "");
+    setInitialPaidAmount("");
     setItems(
       rec.items && rec.items.length > 0
-        ? rec.items
-        : [{ id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 }],
+        ? rec.items.map((it) => ({
+            ...it,
+            quantity: String(it.quantity),
+            unitPrice: String(it.unitPrice),
+          }))
+        : [
+            {
+              id: "1",
+              article: "",
+              quantity: "1",
+              unitPrice: "",
+              totalHT: 0.0,
+            },
+          ],
     );
     setShowReceiptModal(true);
   };
 
-  // Itemized Table Handlers
+  // Dynamic Item Table Handlers
   const handleAddItemRow = () => {
     setItems([
       ...items,
       {
         id: Date.now().toString(),
         article: "",
-        quantity: 1,
-        unitPrice: 0.0,
+        quantity: "1",
+        unitPrice: "",
         totalHT: 0.0,
       },
     ]);
@@ -140,9 +160,13 @@ export default function SupplierDetailScreen({
           const updated = { ...item, [field]: value };
           if (field === "quantity" || field === "unitPrice") {
             const qty =
-              field === "quantity" ? parseFloat(value) || 0 : item.quantity;
+              field === "quantity"
+                ? parseFloat(value) || 0
+                : parseFloat(item.quantity) || 0;
             const price =
-              field === "unitPrice" ? parseFloat(value) || 0 : item.unitPrice;
+              field === "unitPrice"
+                ? parseFloat(value) || 0
+                : parseFloat(item.unitPrice) || 0;
             updated.totalHT = qty * price;
           }
           return updated;
@@ -160,25 +184,70 @@ export default function SupplierDetailScreen({
   const calculateGrandTotal = () =>
     items.reduce((acc, item) => acc + (item.totalHT || 0), 0);
 
-  // Save or Update Receipt
-  const handleSaveReceipt = async () => {
-    if (!receiptNumber) {
-      Alert.alert("Validation Error", "Receipt / Invoice number is required.");
+  // Helper calculations for receipts
+  const getPaidTotal = (rec) => {
+    if (!rec.payments || !Array.isArray(rec.payments)) return 0;
+    return rec.payments.reduce((acc, p) => acc + (p.amount || 0), 0);
+  };
+
+  const getRestToPay = (rec) => {
+    const total = rec.amount || 0;
+    const paid = getPaidTotal(rec);
+    return Math.max(0, total - paid);
+  };
+
+  // Trigger Save / Validate Receipt
+  const handlePreSaveReceipt = () => {
+    if (!receiptNumber.trim()) {
+      setShowMissingNumberModal(true);
       return;
     }
+    executeSaveReceipt(receiptNumber.trim());
+  };
 
+  const executeSaveReceipt = async (finalNumber) => {
     const finalCategory =
       receiptCategory === "Other" ? customCategory || "Other" : receiptCategory;
+    const totalAmount = calculateGrandTotal();
+
+    let initialPayments = [];
+    const initialPaidNum = parseFloat(initialPaidAmount) || 0;
+
+    if (initialPaidNum > 0) {
+      const validInitialPaid = Math.min(initialPaidNum, totalAmount);
+      initialPayments.push({
+        id: Date.now().toString(),
+        date: receiptDate,
+        amount: validInitialPaid,
+      });
+    }
 
     const receiptData = {
-      receiptNumber,
+      receiptNumber: finalNumber,
       category: finalCategory,
       date: receiptDate,
-      items,
-      amount: calculateGrandTotal(),
-      status: "Pending",
+      items: items.map((it) => ({
+        ...it,
+        quantity: parseFloat(it.quantity) || 1,
+        unitPrice: parseFloat(it.unitPrice) || 0,
+      })),
+      amount: totalAmount,
       notes: receiptNotes,
     };
+
+    if (!editingReceiptId) {
+      receiptData.payments = initialPayments;
+      const initialPaidTotal = initialPayments.reduce(
+        (acc, p) => acc + p.amount,
+        0,
+      );
+      receiptData.status =
+        initialPaidTotal >= totalAmount && totalAmount > 0
+          ? "Paid"
+          : initialPaidTotal > 0
+            ? "Partially Paid"
+            : "Pending";
+    }
 
     let res;
     if (editingReceiptId) {
@@ -193,37 +262,81 @@ export default function SupplierDetailScreen({
 
     if (res.success) {
       setShowReceiptModal(false);
+      setShowMissingNumberModal(false);
       loadReceipts();
     } else {
-      Alert.alert("Error", res.error);
+      console.error("Error saving receipt:", res.error);
     }
   };
 
   const handleDeleteReceipt = async (receiptId) => {
-    Alert.alert(
-      "Delete Receipt",
-      "Are you sure you want to delete this receipt?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            const res = await deleteSupplierReceipt(supplier.id, receiptId);
-            if (res.success) loadReceipts();
-          },
-        },
-      ],
-    );
+    const res = await deleteSupplierReceipt(supplier.id, receiptId);
+    if (res.success) {
+      setDeletingReceiptId(null);
+      loadReceipts();
+    } else {
+      console.error("Error deleting receipt:", res.error);
+    }
   };
 
-  // Update Status (Settled vs Pending)
-  const handleUpdateStatus = async (newStatus) => {
+  // Add a new payment transaction to a receipt
+  const handleAddPaymentToReceipt = async () => {
     if (!selectedReceiptForStatus) return;
+    const paymentVal = parseFloat(newPaymentInput) || 0;
+    if (paymentVal <= 0) return;
+
+    const currentPayments = selectedReceiptForStatus.payments || [];
+    const newPaymentEntry = {
+      id: Date.now().toString(),
+      date: new Date().toISOString().split("T")[0],
+      amount: paymentVal,
+    };
+
+    const updatedPayments = [...currentPayments, newPaymentEntry];
+    const totalPaid = updatedPayments.reduce((acc, p) => acc + p.amount, 0);
+    const grandTotal = selectedReceiptForStatus.amount || 0;
+
+    const newStatus = totalPaid >= grandTotal ? "Paid" : "Partially Paid";
+
     const res = await updateSupplierReceipt(
       supplier.id,
       selectedReceiptForStatus.id,
-      { status: newStatus },
+      {
+        payments: updatedPayments,
+        status: newStatus,
+      },
+    );
+
+    if (res.success) {
+      setShowStatusModal(false);
+      setShowPaymentInputBox(false);
+      setNewPaymentInput("");
+      setSelectedReceiptForStatus(null);
+      loadReceipts();
+    }
+  };
+
+  // Direct status toggle (e.g. Mark as Paid Full or Pending)
+  const handleForceStatusChange = async (newStatus) => {
+    if (!selectedReceiptForStatus) return;
+    let updatedFields = { status: newStatus };
+    if (newStatus === "Paid") {
+      // Mark full amount as paid in one transaction
+      updatedFields.payments = [
+        {
+          id: Date.now().toString(),
+          date: new Date().toISOString().split("T")[0],
+          amount: selectedReceiptForStatus.amount || 0,
+        },
+      ];
+    } else if (newStatus === "Pending") {
+      updatedFields.payments = [];
+    }
+
+    const res = await updateSupplierReceipt(
+      supplier.id,
+      selectedReceiptForStatus.id,
+      updatedFields,
     );
     if (res.success) {
       setShowStatusModal(false);
@@ -233,10 +346,7 @@ export default function SupplierDetailScreen({
   };
 
   const calculateTotalOwed = () =>
-    receipts.reduce(
-      (acc, r) => (r.status === "Pending" ? acc + (r.amount || 0) : acc),
-      0,
-    );
+    receipts.reduce((acc, r) => acc + getRestToPay(r), 0);
 
   const handleSaveSupplierInfo = async () => {
     if (!editName || !editPhone) return;
@@ -414,207 +524,341 @@ export default function SupplierDetailScreen({
                 No receipts logged for this supplier yet.
               </Text>
             ) : (
-              receipts.map((rec) => (
-                <View
-                  key={rec.id}
-                  style={[
-                    styles.jobCard,
-                    {
-                      backgroundColor: theme.cardBg,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  <View style={styles.jobCardHeader}>
-                    <Text style={[styles.jobTitle, { color: theme.text }]}>
-                      Receipt #{rec.receiptNumber}
-                    </Text>
-                    <Text style={[styles.jobDate, { color: theme.accent }]}>
-                      📅 {rec.date}
-                    </Text>
-                  </View>
-                  <Text style={[styles.infoText, { color: theme.subText }]}>
-                    🏷️ Category: {rec.category}
-                  </Text>
+              receipts.map((rec) => {
+                const totalHT = rec.amount || 0;
+                const paidTotal = getPaidTotal(rec);
+                const restToPay = getRestToPay(rec);
+                const currentStatus =
+                  restToPay <= 0 && totalHT > 0
+                    ? "Paid"
+                    : paidTotal > 0
+                      ? "Partially Paid"
+                      : "Pending";
 
-                  {/* Detailed Items Table inside card */}
-                  {rec.items && rec.items.length > 0 ? (
-                    <View style={styles.receiptTable}>
-                      <View style={styles.tableHeadRow}>
-                        <Text
-                          style={[styles.th, { flex: 2, color: theme.subText }]}
-                        >
-                          Article
-                        </Text>
-                        <Text
-                          style={[
-                            styles.th,
-                            {
-                              flex: 0.8,
-                              textAlign: "center",
-                              color: theme.subText,
-                            },
-                          ]}
-                        >
-                          Qté
-                        </Text>
-                        <Text
-                          style={[
-                            styles.th,
-                            {
-                              flex: 1.2,
-                              textAlign: "right",
-                              color: theme.subText,
-                            },
-                          ]}
-                        >
-                          P.U HT
-                        </Text>
-                        <Text
-                          style={[
-                            styles.th,
-                            {
-                              flex: 1.2,
-                              textAlign: "right",
-                              color: theme.subText,
-                            },
-                          ]}
-                        >
-                          Total HT
-                        </Text>
-                      </View>
-                      {rec.items.map((it, idx) => (
-                        <View key={idx} style={styles.tableBodyRow}>
+                return (
+                  <View
+                    key={rec.id}
+                    style={[
+                      styles.jobCard,
+                      {
+                        backgroundColor: theme.cardBg,
+                        borderColor: theme.border,
+                      },
+                    ]}
+                  >
+                    <View style={styles.jobCardHeader}>
+                      <Text style={[styles.jobTitle, { color: theme.text }]}>
+                        Receipt #{rec.receiptNumber}
+                      </Text>
+                      <Text style={[styles.jobDate, { color: theme.accent }]}>
+                        📅 {rec.date}
+                      </Text>
+                    </View>
+                    <Text style={[styles.infoText, { color: theme.subText }]}>
+                      🏷️ Category: {rec.category}
+                    </Text>
+
+                    {/* Articles Table */}
+                    {rec.items && rec.items.length > 0 ? (
+                      <View style={styles.receiptTable}>
+                        <View style={styles.tableHeadRow}>
                           <Text
-                            style={[styles.td, { flex: 2, color: theme.text }]}
+                            style={[
+                              styles.th,
+                              { flex: 2, color: theme.subText },
+                            ]}
                           >
-                            {it.article || "Item"}
+                            Article
                           </Text>
                           <Text
                             style={[
-                              styles.td,
+                              styles.th,
                               {
-                                flex: 0.8,
+                                flex: 0.6,
                                 textAlign: "center",
                                 color: theme.subText,
                               },
                             ]}
                           >
-                            {it.quantity}
+                            Qté
                           </Text>
                           <Text
                             style={[
-                              styles.td,
+                              styles.th,
                               {
-                                flex: 1.2,
+                                flex: 1.1,
                                 textAlign: "right",
-                                color: theme.text,
+                                color: theme.subText,
                               },
                             ]}
                           >
-                            {it.unitPrice} TND
+                            P.U HT
                           </Text>
                           <Text
                             style={[
-                              styles.td,
+                              styles.th,
                               {
-                                flex: 1.2,
+                                flex: 1.1,
                                 textAlign: "right",
-                                color: theme.text,
-                                fontWeight: "bold",
+                                color: theme.subText,
                               },
                             ]}
                           >
-                            {it.totalHT} TND
+                            Total HT
                           </Text>
                         </View>
-                      ))}
-                    </View>
-                  ) : null}
+                        {rec.items.map((it, idx) => (
+                          <View key={idx} style={styles.tableBodyRow}>
+                            <Text
+                              style={[
+                                styles.td,
+                                { flex: 2, color: theme.text },
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {it.article || "Item"}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.td,
+                                {
+                                  flex: 0.6,
+                                  textAlign: "center",
+                                  color: theme.subText,
+                                },
+                              ]}
+                            >
+                              {it.quantity}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.td,
+                                {
+                                  flex: 1.1,
+                                  textAlign: "right",
+                                  color: theme.text,
+                                },
+                              ]}
+                            >
+                              {it.unitPrice} TND
+                            </Text>
+                            <Text
+                              style={[
+                                styles.td,
+                                {
+                                  flex: 1.1,
+                                  textAlign: "right",
+                                  color: theme.text,
+                                  fontWeight: "bold",
+                                },
+                              ]}
+                            >
+                              {it.totalHT} TND
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
 
-                  {rec.notes ? (
-                    <Text
+                    {/* Payments Deduction Ledger Table */}
+                    <View
                       style={[
-                        styles.infoText,
-                        { color: theme.text, marginTop: 6 },
-                      ]}
-                    >
-                      💬 Notes: {rec.notes}
-                    </Text>
-                  ) : null}
-
-                  <View
-                    style={[styles.jobFooter, { borderTopColor: theme.border }]}
-                  >
-                    {/* Clickable Status */}
-                    <TouchableOpacity
-                      onPress={() => {
-                        setSelectedReceiptForStatus(rec);
-                        setShowStatusModal(true);
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color:
-                            rec.status === "Pending" ? "#ef4444" : "#10b981",
-                          fontWeight: "bold",
-                          textDecorationLine: "underline",
-                        }}
-                      >
-                        Status: {rec.status} 🔽
-                      </Text>
-                    </TouchableOpacity>
-
-                    <Text style={[styles.jobTotalText, { color: theme.text }]}>
-                      Total: {rec.amount} TND
-                    </Text>
-                  </View>
-
-                  {/* Card Actions: Edit & Delete */}
-                  <View
-                    style={[
-                      styles.cardActionRow,
-                      { borderTopColor: theme.border },
-                    ]}
-                  >
-                    <TouchableOpacity
-                      style={[
-                        styles.cardActionBtn,
+                        styles.ledgerSubTable,
                         {
                           backgroundColor: theme.inputBg,
                           borderColor: theme.border,
-                          borderWidth: 1,
                         },
                       ]}
-                      onPress={() => openEditReceiptModal(rec)}
                     >
-                      <Ionicons
-                        name="pencil-outline"
-                        size={14}
-                        color={theme.text}
-                      />
-                      <Text
-                        style={[styles.cardActionText, { color: theme.text }]}
-                      >
-                        Update
-                      </Text>
-                    </TouchableOpacity>
+                      <View style={styles.ledgerRow}>
+                        <Text
+                          style={[styles.ledgerLabel, { color: theme.subText }]}
+                        >
+                          Total HT Invoice:
+                        </Text>
+                        <Text style={[styles.ledgerVal, { color: theme.text }]}>
+                          {totalHT.toFixed(2)} TND
+                        </Text>
+                      </View>
 
-                    <TouchableOpacity
-                      style={[
-                        styles.cardActionBtn,
-                        { backgroundColor: "#ef4444" },
-                      ]}
-                      onPress={() => handleDeleteReceipt(rec.id)}
-                    >
-                      <Ionicons name="trash-outline" size={14} color="#fff" />
-                      <Text style={[styles.cardActionText, { color: "#fff" }]}>
-                        Delete
+                      {rec.payments && rec.payments.length > 0
+                        ? rec.payments.map((p, pIdx) => (
+                            <View key={pIdx} style={styles.ledgerRow}>
+                              <Text
+                                style={[
+                                  styles.ledgerLabel,
+                                  { color: "#10b981" },
+                                ]}
+                              >
+                                {" "}
+                                ➖ Paid ({p.date}):
+                              </Text>
+                              <Text
+                                style={[styles.ledgerVal, { color: "#10b981" }]}
+                              >
+                                - {p.amount.toFixed(2)} TND
+                              </Text>
+                            </View>
+                          ))
+                        : null}
+
+                      <View
+                        style={[
+                          styles.ledgerRow,
+                          {
+                            borderTopWidth: 1,
+                            borderTopColor: theme.border,
+                            paddingTop: 4,
+                            marginTop: 4,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.ledgerLabelBold,
+                            { color: restToPay > 0 ? "#ef4444" : "#10b981" },
+                          ]}
+                        >
+                          Rest to Pay:
+                        </Text>
+                        <Text
+                          style={[
+                            styles.ledgerValBold,
+                            { color: restToPay > 0 ? "#ef4444" : "#10b981" },
+                          ]}
+                        >
+                          {restToPay.toFixed(2)} TND
+                        </Text>
+                      </View>
+                    </View>
+
+                    {rec.notes ? (
+                      <Text
+                        style={[
+                          styles.infoText,
+                          { color: theme.text, marginTop: 6 },
+                        ]}
+                      >
+                        💬 Notes: {rec.notes}
                       </Text>
-                    </TouchableOpacity>
+                    ) : null}
+
+                    <View
+                      style={[
+                        styles.jobFooter,
+                        { borderTopColor: theme.border },
+                      ]}
+                    >
+                      <TouchableOpacity
+                        onPress={() => {
+                          setSelectedReceiptForStatus(rec);
+                          setShowPaymentInputBox(false);
+                          setShowStatusModal(true);
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              currentStatus === "Pending"
+                                ? "#ef4444"
+                                : currentStatus === "Partially Paid"
+                                  ? "#f59e0b"
+                                  : "#10b981",
+                            fontWeight: "bold",
+                            textDecorationLine: "underline",
+                          }}
+                        >
+                          Status:{" "}
+                          {currentStatus === "Paid"
+                            ? "Paid (Settled)"
+                            : currentStatus}{" "}
+                          🔽
+                        </Text>
+                      </TouchableOpacity>
+
+                      <Text
+                        style={[
+                          styles.jobTotalText,
+                          { color: restToPay > 0 ? "#ef4444" : "#10b981" },
+                        ]}
+                      >
+                        Rest: {restToPay.toFixed(2)} TND
+                      </Text>
+                    </View>
+
+                    {/* Card Actions */}
+                    <View
+                      style={[
+                        styles.cardActionRow,
+                        { borderTopColor: theme.border },
+                      ]}
+                    >
+                      <TouchableOpacity
+                        style={[
+                          styles.cardActionBtn,
+                          {
+                            backgroundColor: theme.inputBg,
+                            borderColor: theme.border,
+                            borderWidth: 1,
+                          },
+                        ]}
+                        onPress={() => openEditReceiptModal(rec)}
+                      >
+                        <Ionicons
+                          name="pencil-outline"
+                          size={14}
+                          color={theme.text}
+                        />
+                        <Text
+                          style={[styles.cardActionText, { color: theme.text }]}
+                        >
+                          Update
+                        </Text>
+                      </TouchableOpacity>
+
+                      {deletingReceiptId === rec.id ? (
+                        <View style={styles.confirmDeleteContainer}>
+                          <TouchableOpacity
+                            style={styles.confirmYesBtn}
+                            onPress={() => handleDeleteReceipt(rec.id)}
+                          >
+                            <Text style={styles.confirmYesText}>Confirm</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.confirmNoBtn}
+                            onPress={() => setDeletingReceiptId(null)}
+                          >
+                            <Ionicons
+                              name="close"
+                              size={16}
+                              color={theme.text}
+                            />
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={[
+                            styles.cardActionBtn,
+                            { backgroundColor: "#ef4444" },
+                          ]}
+                          onPress={() => setDeletingReceiptId(rec.id)}
+                        >
+                          <Ionicons
+                            name="trash-outline"
+                            size={14}
+                            color="#fff"
+                          />
+                          <Text
+                            style={[styles.cardActionText, { color: "#fff" }]}
+                          >
+                            Delete
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   </View>
-                </View>
-              ))
+                );
+              })
             )}
           </View>
         )}
@@ -641,7 +885,7 @@ export default function SupplierDetailScreen({
         )}
       </ScrollView>
 
-      {/* STATUS CHANGE MODAL */}
+      {/* PAYMENT STATUS & ADD PAYMENT TRANSACTION MODAL */}
       <Modal
         animationType="fade"
         transparent={true}
@@ -656,22 +900,159 @@ export default function SupplierDetailScreen({
             ]}
           >
             <Text style={[styles.cardTitle, { color: theme.text }]}>
-              Update Payment Status
+              Manage Payments & Status
             </Text>
+
+            {!showPaymentInputBox ? (
+              <View style={{ gap: 8 }}>
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    { backgroundColor: "#f59e0b" },
+                  ]}
+                  onPress={() => setShowPaymentInputBox(true)}
+                >
+                  <Text style={styles.statusOptionText}>
+                    + Add Paid Amount (Substruct from Total) 💰
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    { backgroundColor: "#10b981" },
+                  ]}
+                  onPress={() => handleForceStatusChange("Paid")}
+                >
+                  <Text style={styles.statusOptionText}>
+                    Mark as Paid Full (Settled)
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    { backgroundColor: "#ef4444" },
+                  ]}
+                  onPress={() => handleForceStatusChange("Pending")}
+                >
+                  <Text style={styles.statusOptionText}>
+                    Reset to Unpaid (Pending)
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    {
+                      backgroundColor: theme.inputBg,
+                      borderWidth: 1,
+                      borderColor: theme.border,
+                    },
+                  ]}
+                  onPress={() => setShowStatusModal(false)}
+                >
+                  <Text
+                    style={[styles.statusOptionText, { color: theme.text }]}
+                  >
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={{ gap: 8 }}>
+                <Text style={{ color: theme.subText, fontSize: 13 }}>
+                  Enter payment amount to substruct from rest:
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      backgroundColor: theme.inputBg,
+                      color: theme.text,
+                      borderColor: theme.border,
+                    },
+                  ]}
+                  placeholder="Amount in TND (e.g. 50)"
+                  placeholderTextColor={theme.placeholder}
+                  keyboardType="numeric"
+                  value={newPaymentInput}
+                  onChangeText={setNewPaymentInput}
+                />
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    { backgroundColor: theme.accent },
+                  ]}
+                  onPress={handleAddPaymentToReceipt}
+                >
+                  <Text style={styles.statusOptionText}>
+                    Confirm Payment Entry
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.statusOptionBtn,
+                    {
+                      backgroundColor: theme.inputBg,
+                      borderWidth: 1,
+                      borderColor: theme.border,
+                    },
+                  ]}
+                  onPress={() => setShowPaymentInputBox(false)}
+                >
+                  <Text
+                    style={[styles.statusOptionText, { color: theme.text }]}
+                  >
+                    Back
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* MISSING RECEIPT NUMBER WEB-SAFE DIALOG MODAL */}
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={showMissingNumberModal}
+        onRequestClose={() => setShowMissingNumberModal(false)}
+      >
+        <View style={styles.statusModalOverlay}>
+          <View
+            style={[
+              styles.statusModalBox,
+              { backgroundColor: theme.cardBg, borderColor: theme.border },
+            ]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.text }]}>
+              Receipt Number Missing
+            </Text>
+            <Text
+              style={{ color: theme.subText, fontSize: 13, marginBottom: 12 }}
+            >
+              You haven't entered a receipt or invoice number. How would you
+              like to proceed?
+            </Text>
+
             <TouchableOpacity
-              style={[styles.statusOptionBtn, { backgroundColor: "#10b981" }]}
-              onPress={() => handleUpdateStatus("Settled")}
+              style={[
+                styles.statusOptionBtn,
+                { backgroundColor: theme.accent },
+              ]}
+              onPress={() =>
+                executeSaveReceipt(
+                  `REC-${Math.floor(1000 + Math.random() * 9000)}`,
+                )
+              }
             >
               <Text style={styles.statusOptionText}>
-                Mark as Settled (Paid Full)
+                ⚡ Auto-Generate Receipt ID
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.statusOptionBtn, { backgroundColor: "#ef4444" }]}
-              onPress={() => handleUpdateStatus("Pending")}
-            >
-              <Text style={styles.statusOptionText}>Mark as Pending</Text>
-            </TouchableOpacity>
+
             <TouchableOpacity
               style={[
                 styles.statusOptionBtn,
@@ -679,12 +1060,13 @@ export default function SupplierDetailScreen({
                   backgroundColor: theme.inputBg,
                   borderWidth: 1,
                   borderColor: theme.border,
+                  marginTop: 8,
                 },
               ]}
-              onPress={() => setShowStatusModal(false)}
+              onPress={() => setShowMissingNumberModal(false)}
             >
               <Text style={[styles.statusOptionText, { color: theme.text }]}>
-                Cancel
+                ⬅️ Go Back & Enter Number
               </Text>
             </TouchableOpacity>
           </View>
@@ -804,7 +1186,7 @@ export default function SupplierDetailScreen({
               />
             )}
 
-            {/* Detailed Facture Table */}
+            {/* Articles Table */}
             <Text
               style={[
                 styles.sectionSubtitle,
@@ -823,7 +1205,7 @@ export default function SupplierDetailScreen({
               <Text
                 style={[
                   styles.legendCol,
-                  { flex: 0.8, textAlign: "center", color: theme.subText },
+                  { flex: 0.6, textAlign: "center", color: theme.subText },
                 ]}
               >
                 Qté
@@ -831,7 +1213,7 @@ export default function SupplierDetailScreen({
               <Text
                 style={[
                   styles.legendCol,
-                  { flex: 1.2, textAlign: "right", color: theme.subText },
+                  { flex: 1.1, textAlign: "right", color: theme.subText },
                 ]}
               >
                 P.U HT
@@ -852,7 +1234,7 @@ export default function SupplierDetailScreen({
                     color: theme.subText,
                     fontSize: 12,
                     fontWeight: "bold",
-                    width: 16,
+                    width: 14,
                   }}
                 >
                   {index + 1}
@@ -873,7 +1255,7 @@ export default function SupplierDetailScreen({
                   style={[
                     styles.inputSmall,
                     {
-                      flex: 0.8,
+                      flex: 0.6,
                       color: theme.text,
                       borderColor: theme.border,
                       textAlign: "center",
@@ -891,7 +1273,7 @@ export default function SupplierDetailScreen({
                   style={[
                     styles.inputSmall,
                     {
-                      flex: 1.2,
+                      flex: 1.1,
                       color: theme.text,
                       borderColor: theme.border,
                       textAlign: "right",
@@ -923,6 +1305,59 @@ export default function SupplierDetailScreen({
               </Text>
             </TouchableOpacity>
 
+            {!editingReceiptId && (
+              <View>
+                <Text
+                  style={[
+                    styles.fieldLabel,
+                    { color: theme.subText, marginTop: 10 },
+                  ]}
+                >
+                  Initial Payment / Deposit Made (Optional)
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      backgroundColor: theme.cardBg,
+                      color: theme.text,
+                      borderColor: theme.border,
+                    },
+                  ]}
+                  placeholder="Amount Paid in TND (<= Total HT)"
+                  placeholderTextColor={theme.placeholder}
+                  keyboardType="numeric"
+                  value={initialPaidAmount}
+                  onChangeText={setInitialPaidAmount}
+                />
+              </View>
+            )}
+
+            <Text
+              style={[
+                styles.fieldLabel,
+                { color: theme.subText, marginTop: 10 },
+              ]}
+            >
+              Notes / Remarks
+            </Text>
+            <TextInput
+              style={[
+                styles.input,
+                {
+                  backgroundColor: theme.cardBg,
+                  color: theme.text,
+                  borderColor: theme.border,
+                  height: 60,
+                },
+              ]}
+              placeholder="e.g. Paid in cash via store delivery"
+              placeholderTextColor={theme.placeholder}
+              multiline
+              value={receiptNotes}
+              onChangeText={setReceiptNotes}
+            />
+
             <View
               style={[
                 styles.summaryBox,
@@ -936,7 +1371,7 @@ export default function SupplierDetailScreen({
 
             <TouchableOpacity
               style={[styles.saveJobBtn, { backgroundColor: theme.accent }]}
-              onPress={handleSaveReceipt}
+              onPress={handlePreSaveReceipt}
             >
               <Text style={styles.saveJobBtnText}>
                 {editingReceiptId ? "Update Receipt" : "Save Receipt to Ledger"}
@@ -1030,8 +1465,27 @@ const styles = StyleSheet.create({
     borderBottomColor: "#cbd5e1",
   },
   th: { fontSize: 11, fontWeight: "bold" },
-  tableBodyRow: { flexDirection: "row", paddingVertical: 2 },
+  tableBodyRow: {
+    flexDirection: "row",
+    paddingVertical: 3,
+    alignItems: "center",
+  },
   td: { fontSize: 12 },
+  ledgerSubTable: {
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginVertical: 6,
+  },
+  ledgerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 2,
+  },
+  ledgerLabel: { fontSize: 12 },
+  ledgerVal: { fontSize: 12, fontWeight: "600" },
+  ledgerLabelBold: { fontSize: 13, fontWeight: "bold" },
+  ledgerValBold: { fontSize: 13, fontWeight: "bold" },
   jobFooter: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1048,6 +1502,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
     borderTopWidth: 1,
     gap: 8,
+    alignItems: "center",
   },
   cardActionBtn: {
     flexDirection: "row",
@@ -1058,6 +1513,24 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   cardActionText: { fontSize: 12, fontWeight: "bold" },
+  confirmDeleteContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  confirmYesBtn: {
+    backgroundColor: "#ef4444",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  confirmYesText: { color: "#fff", fontSize: 11, fontWeight: "bold" },
+  confirmNoBtn: {
+    padding: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+  },
   modalOverlay: { flex: 1 },
   statusModalOverlay: {
     flex: 1,
@@ -1066,7 +1539,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   statusModalBox: {
-    width: "80%",
+    width: "85%",
     padding: 20,
     borderRadius: 12,
     borderWidth: 1,
@@ -1075,9 +1548,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 6,
   },
-  statusOptionText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
+  statusOptionText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
   modalHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1100,10 +1573,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   inputSmall: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     paddingVertical: 6,
     borderRadius: 6,
-    fontSize: 13,
+    fontSize: 12,
     borderWidth: 1,
   },
   sectionSubtitle: { fontSize: 14, fontWeight: "bold", marginVertical: 8 },
@@ -1112,7 +1585,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 4,
     marginBottom: 4,
-    gap: 6,
+    gap: 4,
   },
   legendCol: { fontSize: 11, fontWeight: "bold" },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 },
@@ -1124,7 +1597,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     marginBottom: 6,
-    gap: 6,
+    gap: 4,
   },
   addPartRowBtn: {
     borderStyle: "dashed",
@@ -1165,8 +1638,10 @@ const styles = StyleSheet.create({
 // import { useTheme } from "../context/ThemeContext";
 // import {
 //   addSupplierReceipt,
+//   deleteSupplierReceipt,
 //   getSupplierReceipts,
 //   updateContact,
+//   updateSupplierReceipt,
 // } from "../services/crmService";
 
 // export default function SupplierDetailScreen({
@@ -1175,7 +1650,7 @@ const styles = StyleSheet.create({
 // }) {
 //   const { theme } = useTheme();
 //   const [supplier, setSupplier] = useState(initialSupplier);
-//   const [activeSubTab, setActiveSubTab] = useState("ledger"); // 'ledger' | 'overview'
+//   const [activeSubTab, setActiveSubTab] = useState("ledger");
 //   const [receipts, setReceipts] = useState([]);
 //   const [loadingReceipts, setLoadingReceipts] = useState(false);
 
@@ -1185,17 +1660,33 @@ const styles = StyleSheet.create({
 //   const [editPhone, setEditPhone] = useState(supplier?.phone || "");
 //   const [editAddress, setEditAddress] = useState(supplier?.address || "");
 //   const [specialties, setSpecialties] = useState(
-//     supplier?.specialties || "Disjoncteurs, Câbles, Tableaux",
+//     supplier?.specialties ? supplier.specialties.join(", ") : "",
 //   );
 //   const [savingEdit, setSavingEdit] = useState(false);
 
-//   // Add Receipt Modal State (OCR / Manual Log)
+//   // Add / Edit Receipt Modal State
 //   const [showReceiptModal, setShowReceiptModal] = useState(false);
+//   const [editingReceiptId, setEditingReceiptId] = useState(null);
 //   const [receiptNumber, setReceiptNumber] = useState("");
-//   const [receiptAmount, setReceiptAmount] = useState("");
 //   const [receiptCategory, setReceiptCategory] = useState("Parts Stock");
+//   const [customCategory, setCustomCategory] = useState("");
 //   const [receiptDate, setReceiptDate] = useState("2026-10-15");
-//   const [receiptNotes, setReceiptNotes] = useState("");
+//   const [receiptNotes, setReceiptNotes] = useState(""); // Restored notes field
+
+//   // Detailed Items Table State (Responsive widths)
+//   const [items, setItems] = useState([
+//     { id: "1", article: "", quantity: "1", unitPrice: "", totalHT: 0.0 },
+//   ]);
+
+//   // Payment Status & Partial Payment Modal State
+//   const [showStatusModal, setShowStatusModal] = useState(false);
+//   const [selectedReceiptForStatus, setSelectedReceiptForStatus] =
+//     useState(null);
+//   const [partialAmountInput, setPartialAmountInput] = useState("");
+//   const [showPartialInputBox, setShowPartialInputBox] = useState(false);
+
+//   // Inline Receipt Deletion State (Web & Mobile safe)
+//   const [deletingReceiptId, setDeletingReceiptId] = useState(null);
 
 //   const loadReceipts = async () => {
 //     if (!supplier?.id) return;
@@ -1213,81 +1704,201 @@ const styles = StyleSheet.create({
 //     loadReceipts();
 //   }, [supplier]);
 
-//   const handleSaveSupplierInfo = async () => {
-//     if (!editName || !editPhone) {
-//       Alert.alert("Validation Error", "Name and Phone are required.");
+//   const openNewReceiptModal = () => {
+//     setEditingReceiptId(null);
+//     setReceiptNumber("");
+//     setReceiptCategory("Parts Stock");
+//     setCustomCategory("");
+//     setReceiptDate("2026-10-15");
+//     setReceiptNotes("");
+//     setItems([
+//       { id: "1", article: "", quantity: "1", unitPrice: "", totalHT: 0.0 },
+//     ]);
+//     setShowReceiptModal(true);
+//   };
+
+//   const openEditReceiptModal = (rec) => {
+//     setEditingReceiptId(rec.id);
+//     setReceiptNumber(rec.receiptNumber || "");
+//     setReceiptCategory(
+//       ["Parts Stock", "Tools & Equipment", "Cables & Wiring", "Solar"].includes(
+//         rec.category,
+//       )
+//         ? rec.category
+//         : "Other",
+//     );
+//     setCustomCategory(
+//       ["Parts Stock", "Tools & Equipment", "Cables & Wiring", "Solar"].includes(
+//         rec.category,
+//       )
+//         ? ""
+//         : rec.category,
+//     );
+//     setReceiptDate(rec.date || "2026-10-15");
+//     setReceiptNotes(rec.notes || "");
+//     setItems(
+//       rec.items && rec.items.length > 0
+//         ? rec.items.map((it) => ({
+//             ...it,
+//             quantity: String(it.quantity),
+//             unitPrice: String(it.unitPrice),
+//           }))
+//         : [
+//             {
+//               id: "1",
+//               article: "",
+//               quantity: "1",
+//               unitPrice: "",
+//               totalHT: 0.0,
+//             },
+//           ],
+//     );
+//     setShowReceiptModal(true);
+//   };
+
+//   const handleAddItemRow = () => {
+//     setItems([
+//       ...items,
+//       {
+//         id: Date.now().toString(),
+//         article: "",
+//         quantity: "1",
+//         unitPrice: "",
+//         totalHT: 0.0,
+//       },
+//     ]);
+//   };
+
+//   const handleUpdateItem = (id, field, value) => {
+//     setItems(
+//       items.map((item) => {
+//         if (item.id === id) {
+//           const updated = { ...item, [field]: value };
+//           if (field === "quantity" || field === "unitPrice") {
+//             const qty =
+//               field === "quantity"
+//                 ? parseFloat(value) || 0
+//                 : parseFloat(item.quantity) || 0;
+//             const price =
+//               field === "unitPrice"
+//                 ? parseFloat(value) || 0
+//                 : parseFloat(item.unitPrice) || 0;
+//             updated.totalHT = qty * price;
+//           }
+//           return updated;
+//         }
+//         return item;
+//       }),
+//     );
+//   };
+
+//   const handleRemoveItemRow = (id) => {
+//     if (items.length === 1) return;
+//     setItems(items.filter((item) => item.id !== id));
+//   };
+
+//   const calculateGrandTotal = () =>
+//     items.reduce((acc, item) => acc + (item.totalHT || 0), 0);
+
+//   const handleSaveReceipt = async () => {
+//     if (!receiptNumber) {
+//       Alert.alert("Validation Error", "Receipt / Invoice number is required.");
 //       return;
 //     }
-//     setSavingEdit(true);
 
+//     const finalCategory =
+//       receiptCategory === "Other" ? customCategory || "Other" : receiptCategory;
+
+//     const receiptData = {
+//       receiptNumber,
+//       category: finalCategory,
+//       date: receiptDate,
+//       items: items.map((it) => ({
+//         ...it,
+//         quantity: parseFloat(it.quantity) || 1,
+//         unitPrice: parseFloat(it.unitPrice) || 0,
+//       })),
+//       amount: calculateGrandTotal(),
+//       status: "Pending",
+//       notes: receiptNotes,
+//     };
+
+//     let res;
+//     if (editingReceiptId) {
+//       res = await updateSupplierReceipt(
+//         supplier.id,
+//         editingReceiptId,
+//         receiptData,
+//       );
+//     } else {
+//       res = await addSupplierReceipt(supplier.id, receiptData);
+//     }
+
+//     if (res.success) {
+//       setShowReceiptModal(false);
+//       loadReceipts();
+//     } else {
+//       Alert.alert("Error", res.error);
+//     }
+//   };
+
+//   const handleDeleteReceipt = async (receiptId) => {
+//     const res = await deleteSupplierReceipt(supplier.id, receiptId);
+//     if (res.success) {
+//       setDeletingReceiptId(null);
+//       loadReceipts();
+//     } else {
+//       Alert.alert("Error", res.error);
+//     }
+//   };
+
+//   // Payment Status Management (Pending, Settled, or Partial Amount)
+//   const handleUpdateStatus = async (newStatus, customNote = "") => {
+//     if (!selectedReceiptForStatus) return;
+
+//     let updatedFields = { status: newStatus };
+//     if (newStatus === "Partially Paid" && customNote) {
+//       updatedFields.notes =
+//         (selectedReceiptForStatus.notes
+//           ? selectedReceiptForStatus.notes + " | "
+//           : "") + customNote;
+//     }
+
+//     const res = await updateSupplierReceipt(
+//       supplier.id,
+//       selectedReceiptForStatus.id,
+//       updatedFields,
+//     );
+//     if (res.success) {
+//       setShowStatusModal(false);
+//       setShowPartialInputBox(false);
+//       setPartialAmountInput("");
+//       setSelectedReceiptForStatus(null);
+//       loadReceipts();
+//     }
+//   };
+
+//   const calculateTotalOwed = () =>
+//     receipts.reduce(
+//       (acc, r) => (r.status !== "Settled" ? acc + (r.amount || 0) : acc),
+//       0,
+//     );
+
+//   const handleSaveSupplierInfo = async () => {
+//     if (!editName || !editPhone) return;
+//     setSavingEdit(true);
 //     const updatedData = {
 //       name: editName,
 //       phone: editPhone,
 //       address: editAddress,
 //       specialties: specialties.split(",").map((s) => s.trim()),
 //     };
-
 //     const res = await updateContact(supplier.id, updatedData);
 //     setSavingEdit(false);
-
 //     if (res.success) {
 //       setSupplier({ ...supplier, ...updatedData });
 //       setShowEditModal(false);
-//       Alert.alert("Success", "Supplier details updated!");
-//     } else {
-//       Alert.alert("Error", res.error);
 //     }
-//   };
-
-//   const handleSaveReceipt = async () => {
-//     if (!receiptNumber || !receiptAmount) {
-//       Alert.alert(
-//         "Validation Error",
-//         "Receipt Number and Amount are required.",
-//       );
-//       return;
-//     }
-
-//     const newReceipt = {
-//       receiptNumber,
-//       amount: parseFloat(receiptAmount) || 0,
-//       category: receiptCategory,
-//       date: receiptDate,
-//       status: "Pending",
-//       notes: receiptNotes,
-//     };
-
-//     const res = await addSupplierReceipt(supplier.id, newReceipt);
-//     if (res.success) {
-//       setReceiptNumber("");
-//       setReceiptAmount("");
-//       setReceiptNotes("");
-//       setShowReceiptModal(false);
-//       loadReceipts();
-//       Alert.alert("Success", "Receipt logged successfully to ledger!");
-//     } else {
-//       Alert.alert("Error", res.error);
-//     }
-//   };
-
-//   const calculateTotalOwed = () =>
-//     receipts.reduce(
-//       (acc, r) => (r.status === "Pending" ? acc + (r.amount || 0) : acc),
-//       0,
-//     );
-
-//   const triggerCall = () => {
-//     if (supplier?.phone) Linking.openURL(`tel:${supplier.phone}`);
-//   };
-
-//   const triggerWhatsApp = () => {
-//     if (!supplier?.phone) return;
-//     const msg = encodeURIComponent(
-//       `Hello ${supplier.name}, regarding our material orders with WELEC...`,
-//     );
-//     Linking.openURL(
-//       `https://wa.me/${supplier.phone.replace(/[^0-9]/g, "")}?text=${msg}`,
-//     );
 //   };
 
 //   return (
@@ -1306,7 +1917,7 @@ const styles = StyleSheet.create({
 //         </TouchableOpacity>
 //         <View style={{ flex: 1, marginLeft: 10 }}>
 //           <Text style={[styles.clientNameHeader, { color: theme.text }]}>
-//             {supplier?.name || "Supplier Detail"}
+//             {supplier?.name}
 //           </Text>
 //           <Text style={[styles.clientSubHeader, { color: theme.subText }]}>
 //             🏢 Supplier Ledger
@@ -1330,21 +1941,25 @@ const styles = StyleSheet.create({
 //       >
 //         <TouchableOpacity
 //           style={[styles.contactBtn, { backgroundColor: "#10b981" }]}
-//           onPress={triggerCall}
+//           onPress={() => Linking.openURL(`tel:${supplier?.phone}`)}
 //         >
 //           <Ionicons name="call" size={16} color="#fff" />
 //           <Text style={styles.contactBtnText}>Call</Text>
 //         </TouchableOpacity>
 //         <TouchableOpacity
 //           style={[styles.contactBtn, { backgroundColor: "#25D366" }]}
-//           onPress={triggerWhatsApp}
+//           onPress={() =>
+//             Linking.openURL(
+//               `https://wa.me/${supplier?.phone?.replace(/[^0-9]/g, "")}`,
+//             )
+//           }
 //         >
 //           <Ionicons name="logo-whatsapp" size={16} color="#fff" />
 //           <Text style={styles.contactBtnText}>WhatsApp</Text>
 //         </TouchableOpacity>
 //         <TouchableOpacity
 //           style={[styles.contactBtn, { backgroundColor: theme.accent }]}
-//           onPress={() => setShowReceiptModal(true)}
+//           onPress={openNewReceiptModal}
 //         >
 //           <Ionicons name="camera" size={16} color="#fff" />
 //           <Text style={styles.contactBtnText}>📷 Scan Receipt</Text>
@@ -1403,10 +2018,8 @@ const styles = StyleSheet.create({
 //       </View>
 
 //       <ScrollView contentContainerStyle={{ padding: 16 }}>
-//         {/* TAB 1: LEDGER & RECEIPTS */}
 //         {activeSubTab === "ledger" && (
 //           <View>
-//             {/* Balance Summary Banner */}
 //             <View
 //               style={[
 //                 styles.balanceBanner,
@@ -1428,7 +2041,7 @@ const styles = StyleSheet.create({
 
 //             <TouchableOpacity
 //               style={[styles.addJobBtn, { backgroundColor: theme.accent }]}
-//               onPress={() => setShowReceiptModal(true)}
+//               onPress={openNewReceiptModal}
 //             >
 //               <Ionicons name="receipt" size={20} color="#fff" />
 //               <Text style={[styles.addJobBtnText, { color: "#fff" }]}>
@@ -1469,8 +2082,110 @@ const styles = StyleSheet.create({
 //                   <Text style={[styles.infoText, { color: theme.subText }]}>
 //                     🏷️ Category: {rec.category}
 //                   </Text>
+
+//                   {/* Responsive Detailed Items Table */}
+//                   {rec.items && rec.items.length > 0 ? (
+//                     <View style={styles.receiptTable}>
+//                       <View style={styles.tableHeadRow}>
+//                         <Text
+//                           style={[styles.th, { flex: 2, color: theme.subText }]}
+//                         >
+//                           Article
+//                         </Text>
+//                         <Text
+//                           style={[
+//                             styles.th,
+//                             {
+//                               flex: 0.6,
+//                               textAlign: "center",
+//                               color: theme.subText,
+//                             },
+//                           ]}
+//                         >
+//                           Qté
+//                         </Text>
+//                         <Text
+//                           style={[
+//                             styles.th,
+//                             {
+//                               flex: 1.1,
+//                               textAlign: "right",
+//                               color: theme.subText,
+//                             },
+//                           ]}
+//                         >
+//                           P.U HT
+//                         </Text>
+//                         <Text
+//                           style={[
+//                             styles.th,
+//                             {
+//                               flex: 1.1,
+//                               textAlign: "right",
+//                               color: theme.subText,
+//                             },
+//                           ]}
+//                         >
+//                           Total HT
+//                         </Text>
+//                       </View>
+//                       {rec.items.map((it, idx) => (
+//                         <View key={idx} style={styles.tableBodyRow}>
+//                           <Text
+//                             style={[styles.td, { flex: 2, color: theme.text }]}
+//                             numberOfLines={1}
+//                           >
+//                             {it.article || "Item"}
+//                           </Text>
+//                           <Text
+//                             style={[
+//                               styles.td,
+//                               {
+//                                 flex: 0.6,
+//                                 textAlign: "center",
+//                                 color: theme.subText,
+//                               },
+//                             ]}
+//                           >
+//                             {it.quantity}
+//                           </Text>
+//                           <Text
+//                             style={[
+//                               styles.td,
+//                               {
+//                                 flex: 1.1,
+//                                 textAlign: "right",
+//                                 color: theme.text,
+//                               },
+//                             ]}
+//                           >
+//                             {it.unitPrice} TND
+//                           </Text>
+//                           <Text
+//                             style={[
+//                               styles.td,
+//                               {
+//                                 flex: 1.1,
+//                                 textAlign: "right",
+//                                 color: theme.text,
+//                                 fontWeight: "bold",
+//                               },
+//                             ]}
+//                           >
+//                             {it.totalHT} TND
+//                           </Text>
+//                         </View>
+//                       ))}
+//                     </View>
+//                   ) : null}
+
 //                   {rec.notes ? (
-//                     <Text style={[styles.infoText, { color: theme.text }]}>
+//                     <Text
+//                       style={[
+//                         styles.infoText,
+//                         { color: theme.text, marginTop: 6 },
+//                       ]}
+//                     >
 //                       💬 Notes: {rec.notes}
 //                     </Text>
 //                   ) : null}
@@ -1478,17 +2193,96 @@ const styles = StyleSheet.create({
 //                   <View
 //                     style={[styles.jobFooter, { borderTopColor: theme.border }]}
 //                   >
-//                     <Text
-//                       style={{
-//                         color: rec.status === "Pending" ? "#ef4444" : "#10b981",
-//                         fontWeight: "bold",
+//                     {/* Clickable Status Dropdown Trigger */}
+//                     <TouchableOpacity
+//                       onPress={() => {
+//                         setSelectedReceiptForStatus(rec);
+//                         setShowPartialInputBox(false);
+//                         setShowStatusModal(true);
 //                       }}
 //                     >
-//                       Status: {rec.status}
-//                     </Text>
+//                       <Text
+//                         style={{
+//                           color:
+//                             rec.status === "Pending"
+//                               ? "#ef4444"
+//                               : rec.status === "Partially Paid"
+//                                 ? "#f59e0b"
+//                                 : "#10b981",
+//                           fontWeight: "bold",
+//                           textDecorationLine: "underline",
+//                         }}
+//                       >
+//                         Status: {rec.status} 🔽
+//                       </Text>
+//                     </TouchableOpacity>
+
 //                     <Text style={[styles.jobTotalText, { color: theme.text }]}>
-//                       Amount: {rec.amount} TND
+//                       Total: {rec.amount} TND
 //                     </Text>
+//                   </View>
+
+//                   {/* Card Actions: Edit & Safe Inline Delete */}
+//                   <View
+//                     style={[
+//                       styles.cardActionRow,
+//                       { borderTopColor: theme.border },
+//                     ]}
+//                   >
+//                     <TouchableOpacity
+//                       style={[
+//                         styles.cardActionBtn,
+//                         {
+//                           backgroundColor: theme.inputBg,
+//                           borderColor: theme.border,
+//                           borderWidth: 1,
+//                         },
+//                       ]}
+//                       onPress={() => openEditReceiptModal(rec)}
+//                     >
+//                       <Ionicons
+//                         name="pencil-outline"
+//                         size={14}
+//                         color={theme.text}
+//                       />
+//                       <Text
+//                         style={[styles.cardActionText, { color: theme.text }]}
+//                       >
+//                         Update
+//                       </Text>
+//                     </TouchableOpacity>
+
+//                     {deletingReceiptId === rec.id ? (
+//                       <View style={styles.confirmDeleteContainer}>
+//                         <TouchableOpacity
+//                           style={styles.confirmYesBtn}
+//                           onPress={() => handleDeleteReceipt(rec.id)}
+//                         >
+//                           <Text style={styles.confirmYesText}>Confirm</Text>
+//                         </TouchableOpacity>
+//                         <TouchableOpacity
+//                           style={styles.confirmNoBtn}
+//                           onPress={() => setDeletingReceiptId(null)}
+//                         >
+//                           <Ionicons name="close" size={16} color={theme.text} />
+//                         </TouchableOpacity>
+//                       </View>
+//                     ) : (
+//                       <TouchableOpacity
+//                         style={[
+//                           styles.cardActionBtn,
+//                           { backgroundColor: "#ef4444" },
+//                         ]}
+//                         onPress={() => setDeletingReceiptId(rec.id)}
+//                       >
+//                         <Ionicons name="trash-outline" size={14} color="#fff" />
+//                         <Text
+//                           style={[styles.cardActionText, { color: "#fff" }]}
+//                         >
+//                           Delete
+//                         </Text>
+//                       </TouchableOpacity>
+//                     )}
 //                   </View>
 //                 </View>
 //               ))
@@ -1496,7 +2290,6 @@ const styles = StyleSheet.create({
 //           </View>
 //         )}
 
-//         {/* TAB 2: OVERVIEW & SPECIALTIES */}
 //         {activeSubTab === "overview" && (
 //           <View>
 //             <View
@@ -1515,158 +2308,142 @@ const styles = StyleSheet.create({
 //                 📍 Address: {supplier?.address || "Not specified"}
 //               </Text>
 //             </View>
-
-//             <View
-//               style={[
-//                 styles.infoCard,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   borderColor: theme.border,
-//                   marginTop: 12,
-//                 },
-//               ]}
-//             >
-//               <Text style={[styles.cardTitle, { color: theme.text }]}>
-//                 Specialty Materials Supplied
-//               </Text>
-//               <View style={styles.chipRow}>
-//                 {supplier?.specialties ? (
-//                   Array.isArray(supplier.specialties) ? (
-//                     supplier.specialties.map((spec, i) => (
-//                       <View
-//                         key={i}
-//                         style={[
-//                           styles.specChip,
-//                           {
-//                             backgroundColor: theme.inputBg,
-//                             borderColor: theme.border,
-//                           },
-//                         ]}
-//                       >
-//                         <Text
-//                           style={{
-//                             color: theme.text,
-//                             fontSize: 13,
-//                             fontWeight: "600",
-//                           }}
-//                         >
-//                           ⚡ {spec}
-//                         </Text>
-//                       </View>
-//                     ))
-//                   ) : (
-//                     <Text style={[styles.infoText, { color: theme.text }]}>
-//                       {supplier.specialties}
-//                     </Text>
-//                   )
-//                 ) : (
-//                   <Text style={[styles.infoText, { color: theme.subText }]}>
-//                     No specialties listed.
-//                   </Text>
-//                 )}
-//               </View>
-//             </View>
 //           </View>
 //         )}
 //       </ScrollView>
 
-//       {/* EDIT SUPPLIER MODAL */}
+//       {/* PAYMENT STATUS & PARTIAL PAYMENT MODAL */}
 //       <Modal
-//         animationType="slide"
+//         animationType="fade"
 //         transparent={true}
-//         visible={showEditModal}
-//         onRequestClose={() => setShowEditModal(false)}
+//         visible={showStatusModal}
+//         onRequestClose={() => setShowStatusModal(false)}
 //       >
-//         <SafeAreaView
-//           style={[styles.modalOverlay, { backgroundColor: theme.background }]}
-//         >
-//           <ScrollView contentContainerStyle={{ padding: 20 }}>
-//             <View style={styles.modalHeaderRow}>
-//               <Text style={[styles.modalTitle, { color: theme.text }]}>
-//                 Update Supplier Info
-//               </Text>
-//               <TouchableOpacity onPress={() => setShowEditModal(false)}>
-//                 <Ionicons name="close-circle" size={28} color={theme.subText} />
-//               </TouchableOpacity>
-//             </View>
+//         <View style={styles.statusModalOverlay}>
+//           <View
+//             style={[
+//               styles.statusModalBox,
+//               { backgroundColor: theme.cardBg, borderColor: theme.border },
+//             ]}
+//           >
+//             <Text style={[styles.cardTitle, { color: theme.text }]}>
+//               Update Payment Status
+//             </Text>
 
-//             <TextInput
-//               style={[
-//                 styles.input,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   color: theme.text,
-//                   borderColor: theme.border,
-//                 },
-//               ]}
-//               placeholder="Company / Supplier Name"
-//               placeholderTextColor={theme.placeholder}
-//               value={editName}
-//               onChangeText={setEditName}
-//             />
-//             <TextInput
-//               style={[
-//                 styles.input,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   color: theme.text,
-//                   borderColor: theme.border,
-//                 },
-//               ]}
-//               placeholder="Phone Number"
-//               placeholderTextColor={theme.placeholder}
-//               value={editPhone}
-//               onChangeText={setEditPhone}
-//               keyboardType="phone-pad"
-//             />
-//             <TextInput
-//               style={[
-//                 styles.input,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   color: theme.text,
-//                   borderColor: theme.border,
-//                 },
-//               ]}
-//               placeholder="Address / Warehouse Location"
-//               placeholderTextColor={theme.placeholder}
-//               value={editAddress}
-//               onChangeText={setEditAddress}
-//             />
-//             <TextInput
-//               style={[
-//                 styles.input,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   color: theme.text,
-//                   borderColor: theme.border,
-//                 },
-//               ]}
-//               placeholder="Specialties (comma separated)"
-//               placeholderTextColor={theme.placeholder}
-//               value={specialties}
-//               onChangeText={setSpecialties}
-//             />
+//             {!showPartialInputBox ? (
+//               <View style={{ gap: 8 }}>
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     { backgroundColor: "#10b981" },
+//                   ]}
+//                   onPress={() => handleUpdateStatus("Settled")}
+//                 >
+//                   <Text style={styles.statusOptionText}>
+//                     Mark as Settled (Paid Full)
+//                   </Text>
+//                 </TouchableOpacity>
 
-//             <TouchableOpacity
-//               style={[
-//                 styles.saveJobBtn,
-//                 { backgroundColor: theme.accent, marginTop: 20 },
-//               ]}
-//               onPress={handleSaveSupplierInfo}
-//               disabled={savingEdit}
-//             >
-//               {savingEdit ? (
-//                 <ActivityIndicator color="#fff" />
-//               ) : (
-//                 <Text style={styles.saveJobBtnText}>Save Updates</Text>
-//               )}
-//             </TouchableOpacity>
-//           </ScrollView>
-//         </SafeAreaView>
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     { backgroundColor: "#f59e0b" },
+//                   ]}
+//                   onPress={() => setShowPartialInputBox(true)}
+//                 >
+//                   <Text style={styles.statusOptionText}>
+//                     Pay Partial Amount ✍️
+//                   </Text>
+//                 </TouchableOpacity>
+
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     { backgroundColor: "#ef4444" },
+//                   ]}
+//                   onPress={() => handleUpdateStatus("Pending")}
+//                 >
+//                   <Text style={styles.statusOptionText}>Mark as Pending</Text>
+//                 </TouchableOpacity>
+
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     {
+//                       backgroundColor: theme.inputBg,
+//                       borderWidth: 1,
+//                       borderColor: theme.border,
+//                     },
+//                   ]}
+//                   onPress={() => setShowStatusModal(false)}
+//                 >
+//                   <Text
+//                     style={[styles.statusOptionText, { color: theme.text }]}
+//                   >
+//                     Cancel
+//                   </Text>
+//                 </TouchableOpacity>
+//               </View>
+//             ) : (
+//               <View style={{ gap: 8 }}>
+//                 <Text style={{ color: theme.subText, fontSize: 13 }}>
+//                   Enter amount paid in TND:
+//                 </Text>
+//                 <TextInput
+//                   style={[
+//                     styles.input,
+//                     {
+//                       backgroundColor: theme.inputBg,
+//                       color: theme.text,
+//                       borderColor: theme.border,
+//                     },
+//                   ]}
+//                   placeholder="e.g. 50 TND Paid"
+//                   placeholderTextColor={theme.placeholder}
+//                   keyboardType="numeric"
+//                   value={partialAmountInput}
+//                   onChangeText={setPartialAmountInput}
+//                 />
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     { backgroundColor: theme.accent },
+//                   ]}
+//                   onPress={() =>
+//                     handleUpdateStatus(
+//                       "Partially Paid",
+//                       `Paid: ${partialAmountInput} TND`,
+//                     )
+//                   }
+//                 >
+//                   <Text style={styles.statusOptionText}>
+//                     Confirm Partial Payment
+//                   </Text>
+//                 </TouchableOpacity>
+//                 <TouchableOpacity
+//                   style={[
+//                     styles.statusOptionBtn,
+//                     {
+//                       backgroundColor: theme.inputBg,
+//                       borderWidth: 1,
+//                       borderColor: theme.border,
+//                     },
+//                   ]}
+//                   onPress={() => setShowPartialInputBox(false)}
+//                 >
+//                   <Text
+//                     style={[styles.statusOptionText, { color: theme.text }]}
+//                   >
+//                     Back
+//                   </Text>
+//                 </TouchableOpacity>
+//               </View>
+//             )}
+//           </View>
+//         </View>
 //       </Modal>
 
-//       {/* LOG SUPPLIER RECEIPT MODAL */}
+//       {/* ADD / EDIT RECEIPT MODAL (With Notes & Responsive Table) */}
 //       <Modal
 //         animationType="slide"
 //         transparent={true}
@@ -1679,7 +2456,9 @@ const styles = StyleSheet.create({
 //           <ScrollView contentContainerStyle={{ padding: 20 }}>
 //             <View style={styles.modalHeaderRow}>
 //               <Text style={[styles.modalTitle, { color: theme.text }]}>
-//                 📷 Scan / Log Supplier Receipt
+//                 {editingReceiptId
+//                   ? "Edit Supplier Receipt"
+//                   : "Log Supplier Receipt"}
 //               </Text>
 //               <TouchableOpacity onPress={() => setShowReceiptModal(false)}>
 //                 <Ionicons name="close-circle" size={28} color={theme.subText} />
@@ -1705,26 +2484,7 @@ const styles = StyleSheet.create({
 //             />
 
 //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
-//               Total Amount (TND)
-//             </Text>
-//             <TextInput
-//               style={[
-//                 styles.input,
-//                 {
-//                   backgroundColor: theme.cardBg,
-//                   color: theme.text,
-//                   borderColor: theme.border,
-//                 },
-//               ]}
-//               placeholder="0.00"
-//               placeholderTextColor={theme.placeholder}
-//               keyboardType="numeric"
-//               value={receiptAmount}
-//               onChangeText={setReceiptAmount}
-//             />
-
-//             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
-//               Receipt Date
+//               Date
 //             </Text>
 //             <TextInput
 //               style={[
@@ -1750,6 +2510,7 @@ const styles = StyleSheet.create({
 //                 "Tools & Equipment",
 //                 "Cables & Wiring",
 //                 "Solar",
+//                 "Other",
 //               ].map((cat) => (
 //                 <TouchableOpacity
 //                   key={cat}
@@ -1777,14 +2538,151 @@ const styles = StyleSheet.create({
 //                 </TouchableOpacity>
 //               ))}
 //             </View>
+//             {receiptCategory === "Other" && (
+//               <TextInput
+//                 style={[
+//                   styles.input,
+//                   {
+//                     backgroundColor: theme.cardBg,
+//                     color: theme.text,
+//                     borderColor: theme.border,
+//                     marginTop: 6,
+//                   },
+//                 ]}
+//                 placeholder="Specify Custom Category"
+//                 placeholderTextColor={theme.placeholder}
+//                 value={customCategory}
+//                 onChangeText={setCustomCategory}
+//               />
+//             )}
 
+//             {/* Fully Responsive Detailed Facture Table */}
+//             <Text
+//               style={[
+//                 styles.sectionSubtitle,
+//                 { color: theme.text, marginTop: 14 },
+//               ]}
+//             >
+//               Itemized Facture (N / Article / Qté / P.U HT / Total HT)
+//             </Text>
+
+//             <View style={styles.tableLegendRow}>
+//               <Text
+//                 style={[styles.legendCol, { flex: 2, color: theme.subText }]}
+//               >
+//                 Article
+//               </Text>
+//               <Text
+//                 style={[
+//                   styles.legendCol,
+//                   { flex: 0.6, textAlign: "center", color: theme.subText },
+//                 ]}
+//               >
+//                 Qté
+//               </Text>
+//               <Text
+//                 style={[
+//                   styles.legendCol,
+//                   { flex: 1.1, textAlign: "right", color: theme.subText },
+//                 ]}
+//               >
+//                 P.U HT
+//               </Text>
+//               <View style={{ width: 26 }} />
+//             </View>
+
+//             {items.map((item, index) => (
+//               <View
+//                 key={item.id}
+//                 style={[
+//                   styles.partPickerRow,
+//                   { backgroundColor: theme.cardBg, borderColor: theme.border },
+//                 ]}
+//               >
+//                 <Text
+//                   style={{
+//                     color: theme.subText,
+//                     fontSize: 12,
+//                     fontWeight: "bold",
+//                     width: 14,
+//                   }}
+//                 >
+//                   {index + 1}
+//                 </Text>
+//                 <TextInput
+//                   style={[
+//                     styles.inputSmall,
+//                     { flex: 2, color: theme.text, borderColor: theme.border },
+//                   ]}
+//                   placeholder="Article"
+//                   placeholderTextColor={theme.placeholder}
+//                   value={item.article}
+//                   onChangeText={(val) =>
+//                     handleUpdateItem(item.id, "article", val)
+//                   }
+//                 />
+//                 <TextInput
+//                   style={[
+//                     styles.inputSmall,
+//                     {
+//                       flex: 0.6,
+//                       color: theme.text,
+//                       borderColor: theme.border,
+//                       textAlign: "center",
+//                     },
+//                   ]}
+//                   placeholder="Qty"
+//                   placeholderTextColor={theme.placeholder}
+//                   keyboardType="numeric"
+//                   value={String(item.quantity)}
+//                   onChangeText={(val) =>
+//                     handleUpdateItem(item.id, "quantity", val)
+//                   }
+//                 />
+//                 <TextInput
+//                   style={[
+//                     styles.inputSmall,
+//                     {
+//                       flex: 1.1,
+//                       color: theme.text,
+//                       borderColor: theme.border,
+//                       textAlign: "right",
+//                     },
+//                   ]}
+//                   placeholder="Price"
+//                   placeholderTextColor={theme.placeholder}
+//                   keyboardType="numeric"
+//                   value={String(item.unitPrice)}
+//                   onChangeText={(val) =>
+//                     handleUpdateItem(item.id, "unitPrice", val)
+//                   }
+//                 />
+//                 <TouchableOpacity
+//                   onPress={() => handleRemoveItemRow(item.id)}
+//                   style={{ padding: 4 }}
+//                 >
+//                   <Ionicons name="trash" size={18} color="#ef4444" />
+//                 </TouchableOpacity>
+//               </View>
+//             ))}
+
+//             <TouchableOpacity
+//               style={[styles.addPartRowBtn, { borderColor: theme.accent }]}
+//               onPress={handleAddItemRow}
+//             >
+//               <Text style={[styles.addPartRowText, { color: theme.accent }]}>
+//                 + Add Article Row
+//               </Text>
+//             </TouchableOpacity>
+
+//             {/* Restored Notes Input */}
 //             <Text
 //               style={[
 //                 styles.fieldLabel,
 //                 { color: theme.subText, marginTop: 10 },
 //               ]}
 //             >
-//               Notes / Parts Purchased
+//               Notes / Remarks
 //             </Text>
 //             <TextInput
 //               style={[
@@ -1796,21 +2694,31 @@ const styles = StyleSheet.create({
 //                   height: 70,
 //                 },
 //               ]}
-//               placeholder="e.g. 5x Circuit Breakers 32A"
+//               placeholder="e.g. Paid in cash via store delivery"
 //               placeholderTextColor={theme.placeholder}
 //               multiline
 //               value={receiptNotes}
 //               onChangeText={setReceiptNotes}
 //             />
 
-//             <TouchableOpacity
+//             <View
 //               style={[
-//                 styles.saveJobBtn,
-//                 { backgroundColor: theme.accent, marginTop: 20 },
+//                 styles.summaryBox,
+//                 { backgroundColor: theme.cardBg, borderColor: theme.border },
 //               ]}
+//             >
+//               <Text style={[styles.grandTotalText, { color: theme.accent }]}>
+//                 Grand Total HT: {calculateGrandTotal().toFixed(2)} TND
+//               </Text>
+//             </View>
+
+//             <TouchableOpacity
+//               style={[styles.saveJobBtn, { backgroundColor: theme.accent }]}
 //               onPress={handleSaveReceipt}
 //             >
-//               <Text style={styles.saveJobBtnText}>Save to Supplier Ledger</Text>
+//               <Text style={styles.saveJobBtnText}>
+//                 {editingReceiptId ? "Update Receipt" : "Save Receipt to Ledger"}
+//               </Text>
 //             </TouchableOpacity>
 //           </ScrollView>
 //         </SafeAreaView>
@@ -1864,14 +2772,7 @@ const styles = StyleSheet.create({
 //   bannerAmount: { fontSize: 26, fontWeight: "bold", marginTop: 4 },
 //   infoCard: { padding: 16, borderRadius: 12, borderWidth: 1 },
 //   cardTitle: { fontSize: 16, fontWeight: "bold", marginBottom: 10 },
-//   infoText: { fontSize: 14, marginBottom: 6 },
-//   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 },
-//   specChip: {
-//     paddingHorizontal: 12,
-//     paddingVertical: 6,
-//     borderRadius: 8,
-//     borderWidth: 1,
-//   },
+//   infoText: { fontSize: 14, marginBottom: 4 },
 //   addJobBtn: {
 //     flexDirection: "row",
 //     alignItems: "center",
@@ -1892,6 +2793,27 @@ const styles = StyleSheet.create({
 //   },
 //   jobTitle: { fontSize: 15, fontWeight: "bold" },
 //   jobDate: { fontSize: 12, fontWeight: "bold" },
+//   receiptTable: {
+//     marginVertical: 8,
+//     borderWidth: 1,
+//     borderRadius: 8,
+//     padding: 6,
+//     borderColor: "#cbd5e1",
+//   },
+//   tableHeadRow: {
+//     flexDirection: "row",
+//     borderBottomWidth: 1,
+//     paddingBottom: 4,
+//     marginBottom: 4,
+//     borderBottomColor: "#cbd5e1",
+//   },
+//   th: { fontSize: 11, fontWeight: "bold" },
+//   tableBodyRow: {
+//     flexDirection: "row",
+//     paddingVertical: 3,
+//     alignItems: "center",
+//   },
+//   td: { fontSize: 12 },
 //   jobFooter: {
 //     flexDirection: "row",
 //     justifyContent: "space-between",
@@ -1901,7 +2823,62 @@ const styles = StyleSheet.create({
 //     alignItems: "center",
 //   },
 //   jobTotalText: { fontSize: 14, fontWeight: "bold" },
+//   cardActionRow: {
+//     flexDirection: "row",
+//     justifyContent: "flex-end",
+//     paddingTop: 8,
+//     marginTop: 8,
+//     borderTopWidth: 1,
+//     gap: 8,
+//     alignItems: "center",
+//   },
+//   cardActionBtn: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     paddingHorizontal: 10,
+//     paddingVertical: 6,
+//     borderRadius: 6,
+//     gap: 4,
+//   },
+//   cardActionText: { fontSize: 12, fontWeight: "bold" },
+//   confirmDeleteContainer: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     gap: 6,
+//   },
+//   confirmYesBtn: {
+//     backgroundColor: "#ef4444",
+//     paddingHorizontal: 8,
+//     paddingVertical: 4,
+//     borderRadius: 4,
+//   },
+//   confirmYesText: { color: "#fff", fontSize: 11, fontWeight: "bold" },
+//   confirmNoBtn: {
+//     padding: 4,
+//     borderRadius: 4,
+//     borderWidth: 1,
+//     borderColor: "#cbd5e1",
+//   },
 //   modalOverlay: { flex: 1 },
+//   statusModalOverlay: {
+//     flex: 1,
+//     backgroundColor: "rgba(0,0,0,0.5)",
+//     justifyContent: "center",
+//     alignItems: "center",
+//   },
+//   statusModalBox: {
+//     width: "85%",
+//     padding: 20,
+//     borderRadius: 12,
+//     borderWidth: 1,
+//   },
+//   statusOptionBtn: {
+//     paddingVertical: 12,
+//     borderRadius: 8,
+//     alignItems: "center",
+//     marginTop: 10,
+//   },
+//   statusOptionText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
 //   modalHeaderRow: {
 //     flexDirection: "row",
 //     justifyContent: "space-between",
@@ -1923,7 +2900,1980 @@ const styles = StyleSheet.create({
 //     fontSize: 14,
 //     borderWidth: 1,
 //   },
+//   inputSmall: {
+//     paddingHorizontal: 6,
+//     paddingVertical: 6,
+//     borderRadius: 6,
+//     fontSize: 12,
+//     borderWidth: 1,
+//   },
+//   sectionSubtitle: { fontSize: 14, fontWeight: "bold", marginVertical: 8 },
+//   tableLegendRow: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     paddingHorizontal: 4,
+//     marginBottom: 4,
+//     gap: 4,
+//   },
+//   legendCol: { fontSize: 11, fontWeight: "bold" },
+//   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 },
 //   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+//   partPickerRow: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     padding: 6,
+//     borderRadius: 8,
+//     borderWidth: 1,
+//     marginBottom: 6,
+//     gap: 4,
+//   },
+//   addPartRowBtn: {
+//     borderStyle: "dashed",
+//     borderWidth: 1,
+//     borderRadius: 8,
+//     paddingVertical: 8,
+//     alignItems: "center",
+//     marginBottom: 12,
+//   },
+//   addPartRowText: { fontSize: 13, fontWeight: "bold" },
+//   summaryBox: {
+//     padding: 12,
+//     borderRadius: 8,
+//     borderWidth: 1,
+//     marginVertical: 12,
+//     alignItems: "flex-end",
+//   },
+//   grandTotalText: { fontSize: 16, fontWeight: "bold" },
 //   saveJobBtn: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
 //   saveJobBtnText: { color: "#fff", fontWeight: "bold", fontSize: 15 },
 // });
+
+// // import { Ionicons } from "@expo/vector-icons";
+// // import { useEffect, useState } from "react";
+// // import {
+// //   ActivityIndicator,
+// //   Alert,
+// //   Linking,
+// //   Modal,
+// //   SafeAreaView,
+// //   ScrollView,
+// //   StyleSheet,
+// //   Text,
+// //   TextInput,
+// //   TouchableOpacity,
+// //   View,
+// // } from "react-native";
+// // import { useTheme } from "../context/ThemeContext";
+// // import {
+// //   addSupplierReceipt,
+// //   deleteSupplierReceipt,
+// //   getSupplierReceipts,
+// //   updateContact,
+// //   updateSupplierReceipt,
+// // } from "../services/crmService";
+
+// // export default function SupplierDetailScreen({
+// //   supplier: initialSupplier,
+// //   onBack,
+// // }) {
+// //   const { theme } = useTheme();
+// //   const [supplier, setSupplier] = useState(initialSupplier);
+// //   const [activeSubTab, setActiveSubTab] = useState("ledger");
+// //   const [receipts, setReceipts] = useState([]);
+// //   const [loadingReceipts, setLoadingReceipts] = useState(false);
+
+// //   // Edit Supplier Modal State
+// //   const [showEditModal, setShowEditModal] = useState(false);
+// //   const [editName, setEditName] = useState(supplier?.name || "");
+// //   const [editPhone, setEditPhone] = useState(supplier?.phone || "");
+// //   const [editAddress, setEditAddress] = useState(supplier?.address || "");
+// //   const [specialties, setSpecialties] = useState(
+// //     supplier?.specialties ? supplier.specialties.join(", ") : "",
+// //   );
+// //   const [savingEdit, setSavingEdit] = useState(false);
+
+// //   // Add / Edit Receipt Modal State
+// //   const [showReceiptModal, setShowReceiptModal] = useState(false);
+// //   const [editingReceiptId, setEditingReceiptId] = useState(null);
+// //   const [receiptNumber, setReceiptNumber] = useState("");
+// //   const [receiptCategory, setReceiptCategory] = useState("Parts Stock");
+// //   const [customCategory, setCustomCategory] = useState("");
+// //   const [receiptDate, setReceiptDate] = useState("2026-10-15");
+// //   const [receiptNotes, setReceiptNotes] = useState("");
+
+// //   // Detailed Items Table State
+// //   const [items, setItems] = useState([
+// //     { id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 },
+// //   ]);
+
+// //   // Payment Status Modal State
+// //   const [showStatusModal, setShowStatusModal] = useState(false);
+// //   const [selectedReceiptForStatus, setSelectedReceiptForStatus] =
+// //     useState(null);
+
+// //   const loadReceipts = async () => {
+// //     if (!supplier?.id) return;
+// //     setLoadingReceipts(true);
+// //     const res = await getSupplierReceipts(supplier.id);
+// //     if (res.success) {
+// //       setReceipts(res.data);
+// //     } else {
+// //       Alert.alert("Error", res.error);
+// //     }
+// //     setLoadingReceipts(false);
+// //   };
+
+// //   useEffect(() => {
+// //     loadReceipts();
+// //   }, [supplier]);
+
+// //   // Open Add Receipt Modal
+// //   const openNewReceiptModal = () => {
+// //     setEditingReceiptId(null);
+// //     setReceiptNumber("");
+// //     setReceiptCategory("Parts Stock");
+// //     setCustomCategory("");
+// //     setReceiptDate("2026-10-15");
+// //     setReceiptNotes("");
+// //     setItems([
+// //       { id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 },
+// //     ]);
+// //     setShowReceiptModal(true);
+// //   };
+
+// //   // Open Edit Receipt Modal
+// //   const openEditReceiptModal = (rec) => {
+// //     setEditingReceiptId(rec.id);
+// //     setReceiptNumber(rec.receiptNumber || "");
+// //     setReceiptCategory(
+// //       ["Parts Stock", "Tools & Equipment", "Cables & Wiring", "Solar"].includes(
+// //         rec.category,
+// //       )
+// //         ? rec.category
+// //         : "Other",
+// //     );
+// //     setCustomCategory(
+// //       ["Parts Stock", "Tools & Equipment", "Cables & Wiring", "Solar"].includes(
+// //         rec.category,
+// //       )
+// //         ? ""
+// //         : rec.category,
+// //     );
+// //     setReceiptDate(rec.date || "2026-10-15");
+// //     setReceiptNotes(rec.notes || "");
+// //     setItems(
+// //       rec.items && rec.items.length > 0
+// //         ? rec.items
+// //         : [{ id: "1", article: "", quantity: 1, unitPrice: 0.0, totalHT: 0.0 }],
+// //     );
+// //     setShowReceiptModal(true);
+// //   };
+
+// //   // Itemized Table Handlers
+// //   const handleAddItemRow = () => {
+// //     setItems([
+// //       ...items,
+// //       {
+// //         id: Date.now().toString(),
+// //         article: "",
+// //         quantity: 1,
+// //         unitPrice: 0.0,
+// //         totalHT: 0.0,
+// //       },
+// //     ]);
+// //   };
+
+// //   const handleUpdateItem = (id, field, value) => {
+// //     setItems(
+// //       items.map((item) => {
+// //         if (item.id === id) {
+// //           const updated = { ...item, [field]: value };
+// //           if (field === "quantity" || field === "unitPrice") {
+// //             const qty =
+// //               field === "quantity" ? parseFloat(value) || 0 : item.quantity;
+// //             const price =
+// //               field === "unitPrice" ? parseFloat(value) || 0 : item.unitPrice;
+// //             updated.totalHT = qty * price;
+// //           }
+// //           return updated;
+// //         }
+// //         return item;
+// //       }),
+// //     );
+// //   };
+
+// //   const handleRemoveItemRow = (id) => {
+// //     if (items.length === 1) return;
+// //     setItems(items.filter((item) => item.id !== id));
+// //   };
+
+// //   const calculateGrandTotal = () =>
+// //     items.reduce((acc, item) => acc + (item.totalHT || 0), 0);
+
+// //   // Save or Update Receipt
+// //   const handleSaveReceipt = async () => {
+// //     if (!receiptNumber) {
+// //       Alert.alert("Validation Error", "Receipt / Invoice number is required.");
+// //       return;
+// //     }
+
+// //     const finalCategory =
+// //       receiptCategory === "Other" ? customCategory || "Other" : receiptCategory;
+
+// //     const receiptData = {
+// //       receiptNumber,
+// //       category: finalCategory,
+// //       date: receiptDate,
+// //       items,
+// //       amount: calculateGrandTotal(),
+// //       status: "Pending",
+// //       notes: receiptNotes,
+// //     };
+
+// //     let res;
+// //     if (editingReceiptId) {
+// //       res = await updateSupplierReceipt(
+// //         supplier.id,
+// //         editingReceiptId,
+// //         receiptData,
+// //       );
+// //     } else {
+// //       res = await addSupplierReceipt(supplier.id, receiptData);
+// //     }
+
+// //     if (res.success) {
+// //       setShowReceiptModal(false);
+// //       loadReceipts();
+// //     } else {
+// //       Alert.alert("Error", res.error);
+// //     }
+// //   };
+
+// //   const handleDeleteReceipt = async (receiptId) => {
+// //     Alert.alert(
+// //       "Delete Receipt",
+// //       "Are you sure you want to delete this receipt?",
+// //       [
+// //         { text: "Cancel", style: "cancel" },
+// //         {
+// //           text: "Delete",
+// //           style: "destructive",
+// //           onPress: async () => {
+// //             const res = await deleteSupplierReceipt(supplier.id, receiptId);
+// //             if (res.success) loadReceipts();
+// //           },
+// //         },
+// //       ],
+// //     );
+// //   };
+
+// //   // Update Status (Settled vs Pending)
+// //   const handleUpdateStatus = async (newStatus) => {
+// //     if (!selectedReceiptForStatus) return;
+// //     const res = await updateSupplierReceipt(
+// //       supplier.id,
+// //       selectedReceiptForStatus.id,
+// //       { status: newStatus },
+// //     );
+// //     if (res.success) {
+// //       setShowStatusModal(false);
+// //       setSelectedReceiptForStatus(null);
+// //       loadReceipts();
+// //     }
+// //   };
+
+// //   const calculateTotalOwed = () =>
+// //     receipts.reduce(
+// //       (acc, r) => (r.status === "Pending" ? acc + (r.amount || 0) : acc),
+// //       0,
+// //     );
+
+// //   const handleSaveSupplierInfo = async () => {
+// //     if (!editName || !editPhone) return;
+// //     setSavingEdit(true);
+// //     const updatedData = {
+// //       name: editName,
+// //       phone: editPhone,
+// //       address: editAddress,
+// //       specialties: specialties.split(",").map((s) => s.trim()),
+// //     };
+// //     const res = await updateContact(supplier.id, updatedData);
+// //     setSavingEdit(false);
+// //     if (res.success) {
+// //       setSupplier({ ...supplier, ...updatedData });
+// //       setShowEditModal(false);
+// //     }
+// //   };
+
+// //   return (
+// //     <SafeAreaView
+// //       style={[styles.container, { backgroundColor: theme.background }]}
+// //     >
+// //       {/* Header Bar */}
+// //       <View
+// //         style={[
+// //           styles.header,
+// //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //         ]}
+// //       >
+// //         <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+// //           <Ionicons name="arrow-back" size={22} color={theme.text} />
+// //         </TouchableOpacity>
+// //         <View style={{ flex: 1, marginLeft: 10 }}>
+// //           <Text style={[styles.clientNameHeader, { color: theme.text }]}>
+// //             {supplier?.name}
+// //           </Text>
+// //           <Text style={[styles.clientSubHeader, { color: theme.subText }]}>
+// //             🏢 Supplier Ledger
+// //           </Text>
+// //         </View>
+// //         <TouchableOpacity
+// //           style={[styles.editHeaderBtn, { backgroundColor: theme.accent }]}
+// //           onPress={() => setShowEditModal(true)}
+// //         >
+// //           <Ionicons name="create-outline" size={16} color="#fff" />
+// //           <Text style={styles.editBtnText}>Edit</Text>
+// //         </TouchableOpacity>
+// //       </View>
+
+// //       {/* Quick Action Contact Bar */}
+// //       <View
+// //         style={[
+// //           styles.contactRow,
+// //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //         ]}
+// //       >
+// //         <TouchableOpacity
+// //           style={[styles.contactBtn, { backgroundColor: "#10b981" }]}
+// //           onPress={() => Linking.openURL(`tel:${supplier?.phone}`)}
+// //         >
+// //           <Ionicons name="call" size={16} color="#fff" />
+// //           <Text style={styles.contactBtnText}>Call</Text>
+// //         </TouchableOpacity>
+// //         <TouchableOpacity
+// //           style={[styles.contactBtn, { backgroundColor: "#25D366" }]}
+// //           onPress={() =>
+// //             Linking.openURL(
+// //               `https://wa.me/${supplier?.phone?.replace(/[^0-9]/g, "")}`,
+// //             )
+// //           }
+// //         >
+// //           <Ionicons name="logo-whatsapp" size={16} color="#fff" />
+// //           <Text style={styles.contactBtnText}>WhatsApp</Text>
+// //         </TouchableOpacity>
+// //         <TouchableOpacity
+// //           style={[styles.contactBtn, { backgroundColor: theme.accent }]}
+// //           onPress={openNewReceiptModal}
+// //         >
+// //           <Ionicons name="camera" size={16} color="#fff" />
+// //           <Text style={styles.contactBtnText}>📷 Scan Receipt</Text>
+// //         </TouchableOpacity>
+// //       </View>
+
+// //       {/* Sub Navigation Tabs */}
+// //       <View
+// //         style={[
+// //           styles.tabBar,
+// //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //         ]}
+// //       >
+// //         <TouchableOpacity
+// //           style={[
+// //             styles.tabItem,
+// //             activeSubTab === "ledger" && {
+// //               borderBottomColor: theme.accent,
+// //               borderBottomWidth: 2,
+// //             },
+// //           ]}
+// //           onPress={() => setActiveSubTab("ledger")}
+// //         >
+// //           <Text
+// //             style={[
+// //               styles.tabText,
+// //               activeSubTab === "ledger"
+// //                 ? { color: theme.accent, fontWeight: "bold" }
+// //                 : { color: theme.subText },
+// //             ]}
+// //           >
+// //             🧾 Expense Ledger ({receipts.length})
+// //           </Text>
+// //         </TouchableOpacity>
+// //         <TouchableOpacity
+// //           style={[
+// //             styles.tabItem,
+// //             activeSubTab === "overview" && {
+// //               borderBottomColor: theme.accent,
+// //               borderBottomWidth: 2,
+// //             },
+// //           ]}
+// //           onPress={() => setActiveSubTab("overview")}
+// //         >
+// //           <Text
+// //             style={[
+// //               styles.tabText,
+// //               activeSubTab === "overview"
+// //                 ? { color: theme.accent, fontWeight: "bold" }
+// //                 : { color: theme.subText },
+// //             ]}
+// //           >
+// //             📋 Overview & Specialties
+// //           </Text>
+// //         </TouchableOpacity>
+// //       </View>
+
+// //       <ScrollView contentContainerStyle={{ padding: 16 }}>
+// //         {activeSubTab === "ledger" && (
+// //           <View>
+// //             <View
+// //               style={[
+// //                 styles.balanceBanner,
+// //                 { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //               ]}
+// //             >
+// //               <Text style={[styles.bannerLabel, { color: theme.subText }]}>
+// //                 Outstanding Balance Owed to Supplier:
+// //               </Text>
+// //               <Text
+// //                 style={[
+// //                   styles.bannerAmount,
+// //                   { color: calculateTotalOwed() > 0 ? "#ef4444" : "#10b981" },
+// //                 ]}
+// //               >
+// //                 {calculateTotalOwed().toFixed(2)} TND
+// //               </Text>
+// //             </View>
+
+// //             <TouchableOpacity
+// //               style={[styles.addJobBtn, { backgroundColor: theme.accent }]}
+// //               onPress={openNewReceiptModal}
+// //             >
+// //               <Ionicons name="receipt" size={20} color="#fff" />
+// //               <Text style={[styles.addJobBtnText, { color: "#fff" }]}>
+// //                 Log New Supplier Receipt / Invoice
+// //               </Text>
+// //             </TouchableOpacity>
+
+// //             {loadingReceipts ? (
+// //               <ActivityIndicator
+// //                 size="large"
+// //                 color={theme.accent}
+// //                 style={{ marginTop: 20 }}
+// //               />
+// //             ) : receipts.length === 0 ? (
+// //               <Text style={[styles.emptyText, { color: theme.subText }]}>
+// //                 No receipts logged for this supplier yet.
+// //               </Text>
+// //             ) : (
+// //               receipts.map((rec) => (
+// //                 <View
+// //                   key={rec.id}
+// //                   style={[
+// //                     styles.jobCard,
+// //                     {
+// //                       backgroundColor: theme.cardBg,
+// //                       borderColor: theme.border,
+// //                     },
+// //                   ]}
+// //                 >
+// //                   <View style={styles.jobCardHeader}>
+// //                     <Text style={[styles.jobTitle, { color: theme.text }]}>
+// //                       Receipt #{rec.receiptNumber}
+// //                     </Text>
+// //                     <Text style={[styles.jobDate, { color: theme.accent }]}>
+// //                       📅 {rec.date}
+// //                     </Text>
+// //                   </View>
+// //                   <Text style={[styles.infoText, { color: theme.subText }]}>
+// //                     🏷️ Category: {rec.category}
+// //                   </Text>
+
+// //                   {/* Detailed Items Table inside card */}
+// //                   {rec.items && rec.items.length > 0 ? (
+// //                     <View style={styles.receiptTable}>
+// //                       <View style={styles.tableHeadRow}>
+// //                         <Text
+// //                           style={[styles.th, { flex: 2, color: theme.subText }]}
+// //                         >
+// //                           Article
+// //                         </Text>
+// //                         <Text
+// //                           style={[
+// //                             styles.th,
+// //                             {
+// //                               flex: 0.8,
+// //                               textAlign: "center",
+// //                               color: theme.subText,
+// //                             },
+// //                           ]}
+// //                         >
+// //                           Qté
+// //                         </Text>
+// //                         <Text
+// //                           style={[
+// //                             styles.th,
+// //                             {
+// //                               flex: 1.2,
+// //                               textAlign: "right",
+// //                               color: theme.subText,
+// //                             },
+// //                           ]}
+// //                         >
+// //                           P.U HT
+// //                         </Text>
+// //                         <Text
+// //                           style={[
+// //                             styles.th,
+// //                             {
+// //                               flex: 1.2,
+// //                               textAlign: "right",
+// //                               color: theme.subText,
+// //                             },
+// //                           ]}
+// //                         >
+// //                           Total HT
+// //                         </Text>
+// //                       </View>
+// //                       {rec.items.map((it, idx) => (
+// //                         <View key={idx} style={styles.tableBodyRow}>
+// //                           <Text
+// //                             style={[styles.td, { flex: 2, color: theme.text }]}
+// //                           >
+// //                             {it.article || "Item"}
+// //                           </Text>
+// //                           <Text
+// //                             style={[
+// //                               styles.td,
+// //                               {
+// //                                 flex: 0.8,
+// //                                 textAlign: "center",
+// //                                 color: theme.subText,
+// //                               },
+// //                             ]}
+// //                           >
+// //                             {it.quantity}
+// //                           </Text>
+// //                           <Text
+// //                             style={[
+// //                               styles.td,
+// //                               {
+// //                                 flex: 1.2,
+// //                                 textAlign: "right",
+// //                                 color: theme.text,
+// //                               },
+// //                             ]}
+// //                           >
+// //                             {it.unitPrice} TND
+// //                           </Text>
+// //                           <Text
+// //                             style={[
+// //                               styles.td,
+// //                               {
+// //                                 flex: 1.2,
+// //                                 textAlign: "right",
+// //                                 color: theme.text,
+// //                                 fontWeight: "bold",
+// //                               },
+// //                             ]}
+// //                           >
+// //                             {it.totalHT} TND
+// //                           </Text>
+// //                         </View>
+// //                       ))}
+// //                     </View>
+// //                   ) : null}
+
+// //                   {rec.notes ? (
+// //                     <Text
+// //                       style={[
+// //                         styles.infoText,
+// //                         { color: theme.text, marginTop: 6 },
+// //                       ]}
+// //                     >
+// //                       💬 Notes: {rec.notes}
+// //                     </Text>
+// //                   ) : null}
+
+// //                   <View
+// //                     style={[styles.jobFooter, { borderTopColor: theme.border }]}
+// //                   >
+// //                     {/* Clickable Status */}
+// //                     <TouchableOpacity
+// //                       onPress={() => {
+// //                         setSelectedReceiptForStatus(rec);
+// //                         setShowStatusModal(true);
+// //                       }}
+// //                     >
+// //                       <Text
+// //                         style={{
+// //                           color:
+// //                             rec.status === "Pending" ? "#ef4444" : "#10b981",
+// //                           fontWeight: "bold",
+// //                           textDecorationLine: "underline",
+// //                         }}
+// //                       >
+// //                         Status: {rec.status} 🔽
+// //                       </Text>
+// //                     </TouchableOpacity>
+
+// //                     <Text style={[styles.jobTotalText, { color: theme.text }]}>
+// //                       Total: {rec.amount} TND
+// //                     </Text>
+// //                   </View>
+
+// //                   {/* Card Actions: Edit & Delete */}
+// //                   <View
+// //                     style={[
+// //                       styles.cardActionRow,
+// //                       { borderTopColor: theme.border },
+// //                     ]}
+// //                   >
+// //                     <TouchableOpacity
+// //                       style={[
+// //                         styles.cardActionBtn,
+// //                         {
+// //                           backgroundColor: theme.inputBg,
+// //                           borderColor: theme.border,
+// //                           borderWidth: 1,
+// //                         },
+// //                       ]}
+// //                       onPress={() => openEditReceiptModal(rec)}
+// //                     >
+// //                       <Ionicons
+// //                         name="pencil-outline"
+// //                         size={14}
+// //                         color={theme.text}
+// //                       />
+// //                       <Text
+// //                         style={[styles.cardActionText, { color: theme.text }]}
+// //                       >
+// //                         Update
+// //                       </Text>
+// //                     </TouchableOpacity>
+
+// //                     <TouchableOpacity
+// //                       style={[
+// //                         styles.cardActionBtn,
+// //                         { backgroundColor: "#ef4444" },
+// //                       ]}
+// //                       onPress={() => handleDeleteReceipt(rec.id)}
+// //                     >
+// //                       <Ionicons name="trash-outline" size={14} color="#fff" />
+// //                       <Text style={[styles.cardActionText, { color: "#fff" }]}>
+// //                         Delete
+// //                       </Text>
+// //                     </TouchableOpacity>
+// //                   </View>
+// //                 </View>
+// //               ))
+// //             )}
+// //           </View>
+// //         )}
+
+// //         {activeSubTab === "overview" && (
+// //           <View>
+// //             <View
+// //               style={[
+// //                 styles.infoCard,
+// //                 { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //               ]}
+// //             >
+// //               <Text style={[styles.cardTitle, { color: theme.text }]}>
+// //                 Supplier Details
+// //               </Text>
+// //               <Text style={[styles.infoText, { color: theme.text }]}>
+// //                 📞 Phone: {supplier?.phone}
+// //               </Text>
+// //               <Text style={[styles.infoText, { color: theme.text }]}>
+// //                 📍 Address: {supplier?.address || "Not specified"}
+// //               </Text>
+// //             </View>
+// //           </View>
+// //         )}
+// //       </ScrollView>
+
+// //       {/* STATUS CHANGE MODAL */}
+// //       <Modal
+// //         animationType="fade"
+// //         transparent={true}
+// //         visible={showStatusModal}
+// //         onRequestClose={() => setShowStatusModal(false)}
+// //       >
+// //         <View style={styles.statusModalOverlay}>
+// //           <View
+// //             style={[
+// //               styles.statusModalBox,
+// //               { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //             ]}
+// //           >
+// //             <Text style={[styles.cardTitle, { color: theme.text }]}>
+// //               Update Payment Status
+// //             </Text>
+// //             <TouchableOpacity
+// //               style={[styles.statusOptionBtn, { backgroundColor: "#10b981" }]}
+// //               onPress={() => handleUpdateStatus("Settled")}
+// //             >
+// //               <Text style={styles.statusOptionText}>
+// //                 Mark as Settled (Paid Full)
+// //               </Text>
+// //             </TouchableOpacity>
+// //             <TouchableOpacity
+// //               style={[styles.statusOptionBtn, { backgroundColor: "#ef4444" }]}
+// //               onPress={() => handleUpdateStatus("Pending")}
+// //             >
+// //               <Text style={styles.statusOptionText}>Mark as Pending</Text>
+// //             </TouchableOpacity>
+// //             <TouchableOpacity
+// //               style={[
+// //                 styles.statusOptionBtn,
+// //                 {
+// //                   backgroundColor: theme.inputBg,
+// //                   borderWidth: 1,
+// //                   borderColor: theme.border,
+// //                 },
+// //               ]}
+// //               onPress={() => setShowStatusModal(false)}
+// //             >
+// //               <Text style={[styles.statusOptionText, { color: theme.text }]}>
+// //                 Cancel
+// //               </Text>
+// //             </TouchableOpacity>
+// //           </View>
+// //         </View>
+// //       </Modal>
+
+// //       {/* ADD / EDIT RECEIPT MODAL */}
+// //       <Modal
+// //         animationType="slide"
+// //         transparent={true}
+// //         visible={showReceiptModal}
+// //         onRequestClose={() => setShowReceiptModal(false)}
+// //       >
+// //         <SafeAreaView
+// //           style={[styles.modalOverlay, { backgroundColor: theme.background }]}
+// //         >
+// //           <ScrollView contentContainerStyle={{ padding: 20 }}>
+// //             <View style={styles.modalHeaderRow}>
+// //               <Text style={[styles.modalTitle, { color: theme.text }]}>
+// //                 {editingReceiptId
+// //                   ? "Edit Supplier Receipt"
+// //                   : "Log Supplier Receipt"}
+// //               </Text>
+// //               <TouchableOpacity onPress={() => setShowReceiptModal(false)}>
+// //                 <Ionicons name="close-circle" size={28} color={theme.subText} />
+// //               </TouchableOpacity>
+// //             </View>
+
+// //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// //               Receipt / Invoice Number
+// //             </Text>
+// //             <TextInput
+// //               style={[
+// //                 styles.input,
+// //                 {
+// //                   backgroundColor: theme.cardBg,
+// //                   color: theme.text,
+// //                   borderColor: theme.border,
+// //                 },
+// //               ]}
+// //               placeholder="e.g. REC-9921"
+// //               placeholderTextColor={theme.placeholder}
+// //               value={receiptNumber}
+// //               onChangeText={setReceiptNumber}
+// //             />
+
+// //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// //               Date
+// //             </Text>
+// //             <TextInput
+// //               style={[
+// //                 styles.input,
+// //                 {
+// //                   backgroundColor: theme.cardBg,
+// //                   color: theme.text,
+// //                   borderColor: theme.border,
+// //                 },
+// //               ]}
+// //               placeholder="YYYY-MM-DD"
+// //               placeholderTextColor={theme.placeholder}
+// //               value={receiptDate}
+// //               onChangeText={setReceiptDate}
+// //             />
+
+// //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// //               Category
+// //             </Text>
+// //             <View style={styles.chipRow}>
+// //               {[
+// //                 "Parts Stock",
+// //                 "Tools & Equipment",
+// //                 "Cables & Wiring",
+// //                 "Solar",
+// //                 "Other",
+// //               ].map((cat) => (
+// //                 <TouchableOpacity
+// //                   key={cat}
+// //                   style={[
+// //                     styles.chip,
+// //                     receiptCategory === cat
+// //                       ? { backgroundColor: theme.accent }
+// //                       : {
+// //                           backgroundColor: theme.cardBg,
+// //                           borderColor: theme.border,
+// //                           borderWidth: 1,
+// //                         },
+// //                   ]}
+// //                   onPress={() => setReceiptCategory(cat)}
+// //                 >
+// //                   <Text
+// //                     style={{
+// //                       color: receiptCategory === cat ? "#fff" : theme.text,
+// //                       fontSize: 13,
+// //                       fontWeight: "bold",
+// //                     }}
+// //                   >
+// //                     {cat}
+// //                   </Text>
+// //                 </TouchableOpacity>
+// //               ))}
+// //             </View>
+// //             {receiptCategory === "Other" && (
+// //               <TextInput
+// //                 style={[
+// //                   styles.input,
+// //                   {
+// //                     backgroundColor: theme.cardBg,
+// //                     color: theme.text,
+// //                     borderColor: theme.border,
+// //                     marginTop: 6,
+// //                   },
+// //                 ]}
+// //                 placeholder="Specify Custom Category"
+// //                 placeholderTextColor={theme.placeholder}
+// //                 value={customCategory}
+// //                 onChangeText={setCustomCategory}
+// //               />
+// //             )}
+
+// //             {/* Detailed Facture Table */}
+// //             <Text
+// //               style={[
+// //                 styles.sectionSubtitle,
+// //                 { color: theme.text, marginTop: 14 },
+// //               ]}
+// //             >
+// //               Itemized Facture (N / Article / Qté / P.U HT / Total HT)
+// //             </Text>
+
+// //             <View style={styles.tableLegendRow}>
+// //               <Text
+// //                 style={[styles.legendCol, { flex: 2, color: theme.subText }]}
+// //               >
+// //                 Article
+// //               </Text>
+// //               <Text
+// //                 style={[
+// //                   styles.legendCol,
+// //                   { flex: 0.8, textAlign: "center", color: theme.subText },
+// //                 ]}
+// //               >
+// //                 Qté
+// //               </Text>
+// //               <Text
+// //                 style={[
+// //                   styles.legendCol,
+// //                   { flex: 1.2, textAlign: "right", color: theme.subText },
+// //                 ]}
+// //               >
+// //                 P.U HT
+// //               </Text>
+// //               <View style={{ width: 26 }} />
+// //             </View>
+
+// //             {items.map((item, index) => (
+// //               <View
+// //                 key={item.id}
+// //                 style={[
+// //                   styles.partPickerRow,
+// //                   { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //                 ]}
+// //               >
+// //                 <Text
+// //                   style={{
+// //                     color: theme.subText,
+// //                     fontSize: 12,
+// //                     fontWeight: "bold",
+// //                     width: 16,
+// //                   }}
+// //                 >
+// //                   {index + 1}
+// //                 </Text>
+// //                 <TextInput
+// //                   style={[
+// //                     styles.inputSmall,
+// //                     { flex: 2, color: theme.text, borderColor: theme.border },
+// //                   ]}
+// //                   placeholder="Article"
+// //                   placeholderTextColor={theme.placeholder}
+// //                   value={item.article}
+// //                   onChangeText={(val) =>
+// //                     handleUpdateItem(item.id, "article", val)
+// //                   }
+// //                 />
+// //                 <TextInput
+// //                   style={[
+// //                     styles.inputSmall,
+// //                     {
+// //                       flex: 0.8,
+// //                       color: theme.text,
+// //                       borderColor: theme.border,
+// //                       textAlign: "center",
+// //                     },
+// //                   ]}
+// //                   placeholder="Qty"
+// //                   placeholderTextColor={theme.placeholder}
+// //                   keyboardType="numeric"
+// //                   value={String(item.quantity)}
+// //                   onChangeText={(val) =>
+// //                     handleUpdateItem(item.id, "quantity", val)
+// //                   }
+// //                 />
+// //                 <TextInput
+// //                   style={[
+// //                     styles.inputSmall,
+// //                     {
+// //                       flex: 1.2,
+// //                       color: theme.text,
+// //                       borderColor: theme.border,
+// //                       textAlign: "right",
+// //                     },
+// //                   ]}
+// //                   placeholder="Price"
+// //                   placeholderTextColor={theme.placeholder}
+// //                   keyboardType="numeric"
+// //                   value={String(item.unitPrice)}
+// //                   onChangeText={(val) =>
+// //                     handleUpdateItem(item.id, "unitPrice", val)
+// //                   }
+// //                 />
+// //                 <TouchableOpacity
+// //                   onPress={() => handleRemoveItemRow(item.id)}
+// //                   style={{ padding: 4 }}
+// //                 >
+// //                   <Ionicons name="trash" size={18} color="#ef4444" />
+// //                 </TouchableOpacity>
+// //               </View>
+// //             ))}
+
+// //             <TouchableOpacity
+// //               style={[styles.addPartRowBtn, { borderColor: theme.accent }]}
+// //               onPress={handleAddItemRow}
+// //             >
+// //               <Text style={[styles.addPartRowText, { color: theme.accent }]}>
+// //                 + Add Article Row
+// //               </Text>
+// //             </TouchableOpacity>
+
+// //             <View
+// //               style={[
+// //                 styles.summaryBox,
+// //                 { backgroundColor: theme.cardBg, borderColor: theme.border },
+// //               ]}
+// //             >
+// //               <Text style={[styles.grandTotalText, { color: theme.accent }]}>
+// //                 Grand Total HT: {calculateGrandTotal().toFixed(2)} TND
+// //               </Text>
+// //             </View>
+
+// //             <TouchableOpacity
+// //               style={[styles.saveJobBtn, { backgroundColor: theme.accent }]}
+// //               onPress={handleSaveReceipt}
+// //             >
+// //               <Text style={styles.saveJobBtnText}>
+// //                 {editingReceiptId ? "Update Receipt" : "Save Receipt to Ledger"}
+// //               </Text>
+// //             </TouchableOpacity>
+// //           </ScrollView>
+// //         </SafeAreaView>
+// //       </Modal>
+// //     </SafeAreaView>
+// //   );
+// // }
+
+// // const styles = StyleSheet.create({
+// //   container: { flex: 1 },
+// //   header: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     padding: 14,
+// //     borderWidth: 1,
+// //   },
+// //   backBtn: { padding: 4 },
+// //   editHeaderBtn: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     paddingHorizontal: 10,
+// //     paddingVertical: 6,
+// //     borderRadius: 6,
+// //     gap: 4,
+// //   },
+// //   editBtnText: { color: "#fff", fontSize: 12, fontWeight: "bold" },
+// //   clientNameHeader: { fontSize: 18, fontWeight: "bold" },
+// //   clientSubHeader: { fontSize: 12 },
+// //   contactRow: { flexDirection: "row", padding: 12, borderWidth: 1, gap: 8 },
+// //   contactBtn: {
+// //     flex: 1,
+// //     flexDirection: "row",
+// //     justifyContent: "center",
+// //     alignItems: "center",
+// //     paddingVertical: 10,
+// //     borderRadius: 8,
+// //     gap: 6,
+// //   },
+// //   contactBtnText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
+// //   tabBar: { flexDirection: "row", borderWidth: 1 },
+// //   tabItem: { flex: 1, paddingVertical: 12, alignItems: "center" },
+// //   tabText: { fontSize: 13 },
+// //   balanceBanner: {
+// //     padding: 16,
+// //     borderRadius: 12,
+// //     borderWidth: 1,
+// //     marginBottom: 16,
+// //     alignItems: "center",
+// //   },
+// //   bannerLabel: { fontSize: 13, fontWeight: "bold" },
+// //   bannerAmount: { fontSize: 26, fontWeight: "bold", marginTop: 4 },
+// //   infoCard: { padding: 16, borderRadius: 12, borderWidth: 1 },
+// //   cardTitle: { fontSize: 16, fontWeight: "bold", marginBottom: 10 },
+// //   infoText: { fontSize: 14, marginBottom: 4 },
+// //   addJobBtn: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     justifyContent: "center",
+// //     padding: 12,
+// //     borderRadius: 10,
+// //     marginBottom: 16,
+// //     gap: 6,
+// //   },
+// //   addJobBtnText: { fontWeight: "bold", fontSize: 14 },
+// //   emptyText: { textAlign: "center", fontStyle: "italic", marginTop: 20 },
+// //   jobCard: { padding: 14, borderRadius: 12, borderWidth: 1, marginBottom: 12 },
+// //   jobCardHeader: {
+// //     flexDirection: "row",
+// //     justifyContent: "space-between",
+// //     alignItems: "center",
+// //     marginBottom: 6,
+// //   },
+// //   jobTitle: { fontSize: 15, fontWeight: "bold" },
+// //   jobDate: { fontSize: 12, fontWeight: "bold" },
+// //   receiptTable: {
+// //     marginVertical: 8,
+// //     borderWidth: 1,
+// //     borderRadius: 8,
+// //     padding: 6,
+// //     borderColor: "#cbd5e1",
+// //   },
+// //   tableHeadRow: {
+// //     flexDirection: "row",
+// //     borderBottomWidth: 1,
+// //     paddingBottom: 4,
+// //     marginBottom: 4,
+// //     borderBottomColor: "#cbd5e1",
+// //   },
+// //   th: { fontSize: 11, fontWeight: "bold" },
+// //   tableBodyRow: { flexDirection: "row", paddingVertical: 2 },
+// //   td: { fontSize: 12 },
+// //   jobFooter: {
+// //     flexDirection: "row",
+// //     justifyContent: "space-between",
+// //     paddingTop: 8,
+// //     marginTop: 8,
+// //     borderTopWidth: 1,
+// //     alignItems: "center",
+// //   },
+// //   jobTotalText: { fontSize: 14, fontWeight: "bold" },
+// //   cardActionRow: {
+// //     flexDirection: "row",
+// //     justifyContent: "flex-end",
+// //     paddingTop: 8,
+// //     marginTop: 8,
+// //     borderTopWidth: 1,
+// //     gap: 8,
+// //   },
+// //   cardActionBtn: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     paddingHorizontal: 10,
+// //     paddingVertical: 6,
+// //     borderRadius: 6,
+// //     gap: 4,
+// //   },
+// //   cardActionText: { fontSize: 12, fontWeight: "bold" },
+// //   modalOverlay: { flex: 1 },
+// //   statusModalOverlay: {
+// //     flex: 1,
+// //     backgroundColor: "rgba(0,0,0,0.5)",
+// //     justifyContent: "center",
+// //     alignItems: "center",
+// //   },
+// //   statusModalBox: {
+// //     width: "80%",
+// //     padding: 20,
+// //     borderRadius: 12,
+// //     borderWidth: 1,
+// //   },
+// //   statusOptionBtn: {
+// //     paddingVertical: 12,
+// //     borderRadius: 8,
+// //     alignItems: "center",
+// //     marginTop: 10,
+// //   },
+// //   statusOptionText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
+// //   modalHeaderRow: {
+// //     flexDirection: "row",
+// //     justifyContent: "space-between",
+// //     alignItems: "center",
+// //     marginBottom: 16,
+// //   },
+// //   modalTitle: { fontSize: 18, fontWeight: "bold" },
+// //   fieldLabel: {
+// //     fontSize: 12,
+// //     fontWeight: "bold",
+// //     marginBottom: 4,
+// //     marginTop: 8,
+// //   },
+// //   input: {
+// //     paddingHorizontal: 12,
+// //     paddingVertical: 10,
+// //     borderRadius: 8,
+// //     marginBottom: 10,
+// //     fontSize: 14,
+// //     borderWidth: 1,
+// //   },
+// //   inputSmall: {
+// //     paddingHorizontal: 8,
+// //     paddingVertical: 6,
+// //     borderRadius: 6,
+// //     fontSize: 13,
+// //     borderWidth: 1,
+// //   },
+// //   sectionSubtitle: { fontSize: 14, fontWeight: "bold", marginVertical: 8 },
+// //   tableLegendRow: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     paddingHorizontal: 4,
+// //     marginBottom: 4,
+// //     gap: 6,
+// //   },
+// //   legendCol: { fontSize: 11, fontWeight: "bold" },
+// //   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 },
+// //   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+// //   partPickerRow: {
+// //     flexDirection: "row",
+// //     alignItems: "center",
+// //     padding: 6,
+// //     borderRadius: 8,
+// //     borderWidth: 1,
+// //     marginBottom: 6,
+// //     gap: 6,
+// //   },
+// //   addPartRowBtn: {
+// //     borderStyle: "dashed",
+// //     borderWidth: 1,
+// //     borderRadius: 8,
+// //     paddingVertical: 8,
+// //     alignItems: "center",
+// //     marginBottom: 12,
+// //   },
+// //   addPartRowText: { fontSize: 13, fontWeight: "bold" },
+// //   summaryBox: {
+// //     padding: 12,
+// //     borderRadius: 8,
+// //     borderWidth: 1,
+// //     marginVertical: 12,
+// //     alignItems: "flex-end",
+// //   },
+// //   grandTotalText: { fontSize: 16, fontWeight: "bold" },
+// //   saveJobBtn: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+// //   saveJobBtnText: { color: "#fff", fontWeight: "bold", fontSize: 15 },
+// // });
+
+// // // import { Ionicons } from "@expo/vector-icons";
+// // // import { useEffect, useState } from "react";
+// // // import {
+// // //   ActivityIndicator,
+// // //   Alert,
+// // //   Linking,
+// // //   Modal,
+// // //   SafeAreaView,
+// // //   ScrollView,
+// // //   StyleSheet,
+// // //   Text,
+// // //   TextInput,
+// // //   TouchableOpacity,
+// // //   View,
+// // // } from "react-native";
+// // // import { useTheme } from "../context/ThemeContext";
+// // // import {
+// // //   addSupplierReceipt,
+// // //   getSupplierReceipts,
+// // //   updateContact,
+// // // } from "../services/crmService";
+
+// // // export default function SupplierDetailScreen({
+// // //   supplier: initialSupplier,
+// // //   onBack,
+// // // }) {
+// // //   const { theme } = useTheme();
+// // //   const [supplier, setSupplier] = useState(initialSupplier);
+// // //   const [activeSubTab, setActiveSubTab] = useState("ledger"); // 'ledger' | 'overview'
+// // //   const [receipts, setReceipts] = useState([]);
+// // //   const [loadingReceipts, setLoadingReceipts] = useState(false);
+
+// // //   // Edit Supplier Modal State
+// // //   const [showEditModal, setShowEditModal] = useState(false);
+// // //   const [editName, setEditName] = useState(supplier?.name || "");
+// // //   const [editPhone, setEditPhone] = useState(supplier?.phone || "");
+// // //   const [editAddress, setEditAddress] = useState(supplier?.address || "");
+// // //   const [specialties, setSpecialties] = useState(
+// // //     supplier?.specialties || "Disjoncteurs, Câbles, Tableaux",
+// // //   );
+// // //   const [savingEdit, setSavingEdit] = useState(false);
+
+// // //   // Add Receipt Modal State (OCR / Manual Log)
+// // //   const [showReceiptModal, setShowReceiptModal] = useState(false);
+// // //   const [receiptNumber, setReceiptNumber] = useState("");
+// // //   const [receiptAmount, setReceiptAmount] = useState("");
+// // //   const [receiptCategory, setReceiptCategory] = useState("Parts Stock");
+// // //   const [receiptDate, setReceiptDate] = useState("2026-10-15");
+// // //   const [receiptNotes, setReceiptNotes] = useState("");
+
+// // //   const loadReceipts = async () => {
+// // //     if (!supplier?.id) return;
+// // //     setLoadingReceipts(true);
+// // //     const res = await getSupplierReceipts(supplier.id);
+// // //     if (res.success) {
+// // //       setReceipts(res.data);
+// // //     } else {
+// // //       Alert.alert("Error", res.error);
+// // //     }
+// // //     setLoadingReceipts(false);
+// // //   };
+
+// // //   useEffect(() => {
+// // //     loadReceipts();
+// // //   }, [supplier]);
+
+// // //   const handleSaveSupplierInfo = async () => {
+// // //     if (!editName || !editPhone) {
+// // //       Alert.alert("Validation Error", "Name and Phone are required.");
+// // //       return;
+// // //     }
+// // //     setSavingEdit(true);
+
+// // //     const updatedData = {
+// // //       name: editName,
+// // //       phone: editPhone,
+// // //       address: editAddress,
+// // //       specialties: specialties.split(",").map((s) => s.trim()),
+// // //     };
+
+// // //     const res = await updateContact(supplier.id, updatedData);
+// // //     setSavingEdit(false);
+
+// // //     if (res.success) {
+// // //       setSupplier({ ...supplier, ...updatedData });
+// // //       setShowEditModal(false);
+// // //       Alert.alert("Success", "Supplier details updated!");
+// // //     } else {
+// // //       Alert.alert("Error", res.error);
+// // //     }
+// // //   };
+
+// // //   const handleSaveReceipt = async () => {
+// // //     if (!receiptNumber || !receiptAmount) {
+// // //       Alert.alert(
+// // //         "Validation Error",
+// // //         "Receipt Number and Amount are required.",
+// // //       );
+// // //       return;
+// // //     }
+
+// // //     const newReceipt = {
+// // //       receiptNumber,
+// // //       amount: parseFloat(receiptAmount) || 0,
+// // //       category: receiptCategory,
+// // //       date: receiptDate,
+// // //       status: "Pending",
+// // //       notes: receiptNotes,
+// // //     };
+
+// // //     const res = await addSupplierReceipt(supplier.id, newReceipt);
+// // //     if (res.success) {
+// // //       setReceiptNumber("");
+// // //       setReceiptAmount("");
+// // //       setReceiptNotes("");
+// // //       setShowReceiptModal(false);
+// // //       loadReceipts();
+// // //       Alert.alert("Success", "Receipt logged successfully to ledger!");
+// // //     } else {
+// // //       Alert.alert("Error", res.error);
+// // //     }
+// // //   };
+
+// // //   const calculateTotalOwed = () =>
+// // //     receipts.reduce(
+// // //       (acc, r) => (r.status === "Pending" ? acc + (r.amount || 0) : acc),
+// // //       0,
+// // //     );
+
+// // //   const triggerCall = () => {
+// // //     if (supplier?.phone) Linking.openURL(`tel:${supplier.phone}`);
+// // //   };
+
+// // //   const triggerWhatsApp = () => {
+// // //     if (!supplier?.phone) return;
+// // //     const msg = encodeURIComponent(
+// // //       `Hello ${supplier.name}, regarding our material orders with WELEC...`,
+// // //     );
+// // //     Linking.openURL(
+// // //       `https://wa.me/${supplier.phone.replace(/[^0-9]/g, "")}?text=${msg}`,
+// // //     );
+// // //   };
+
+// // //   return (
+// // //     <SafeAreaView
+// // //       style={[styles.container, { backgroundColor: theme.background }]}
+// // //     >
+// // //       {/* Header Bar */}
+// // //       <View
+// // //         style={[
+// // //           styles.header,
+// // //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// // //         ]}
+// // //       >
+// // //         <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+// // //           <Ionicons name="arrow-back" size={22} color={theme.text} />
+// // //         </TouchableOpacity>
+// // //         <View style={{ flex: 1, marginLeft: 10 }}>
+// // //           <Text style={[styles.clientNameHeader, { color: theme.text }]}>
+// // //             {supplier?.name || "Supplier Detail"}
+// // //           </Text>
+// // //           <Text style={[styles.clientSubHeader, { color: theme.subText }]}>
+// // //             🏢 Supplier Ledger
+// // //           </Text>
+// // //         </View>
+// // //         <TouchableOpacity
+// // //           style={[styles.editHeaderBtn, { backgroundColor: theme.accent }]}
+// // //           onPress={() => setShowEditModal(true)}
+// // //         >
+// // //           <Ionicons name="create-outline" size={16} color="#fff" />
+// // //           <Text style={styles.editBtnText}>Edit</Text>
+// // //         </TouchableOpacity>
+// // //       </View>
+
+// // //       {/* Quick Action Contact Bar */}
+// // //       <View
+// // //         style={[
+// // //           styles.contactRow,
+// // //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// // //         ]}
+// // //       >
+// // //         <TouchableOpacity
+// // //           style={[styles.contactBtn, { backgroundColor: "#10b981" }]}
+// // //           onPress={triggerCall}
+// // //         >
+// // //           <Ionicons name="call" size={16} color="#fff" />
+// // //           <Text style={styles.contactBtnText}>Call</Text>
+// // //         </TouchableOpacity>
+// // //         <TouchableOpacity
+// // //           style={[styles.contactBtn, { backgroundColor: "#25D366" }]}
+// // //           onPress={triggerWhatsApp}
+// // //         >
+// // //           <Ionicons name="logo-whatsapp" size={16} color="#fff" />
+// // //           <Text style={styles.contactBtnText}>WhatsApp</Text>
+// // //         </TouchableOpacity>
+// // //         <TouchableOpacity
+// // //           style={[styles.contactBtn, { backgroundColor: theme.accent }]}
+// // //           onPress={() => setShowReceiptModal(true)}
+// // //         >
+// // //           <Ionicons name="camera" size={16} color="#fff" />
+// // //           <Text style={styles.contactBtnText}>📷 Scan Receipt</Text>
+// // //         </TouchableOpacity>
+// // //       </View>
+
+// // //       {/* Sub Navigation Tabs */}
+// // //       <View
+// // //         style={[
+// // //           styles.tabBar,
+// // //           { backgroundColor: theme.cardBg, borderColor: theme.border },
+// // //         ]}
+// // //       >
+// // //         <TouchableOpacity
+// // //           style={[
+// // //             styles.tabItem,
+// // //             activeSubTab === "ledger" && {
+// // //               borderBottomColor: theme.accent,
+// // //               borderBottomWidth: 2,
+// // //             },
+// // //           ]}
+// // //           onPress={() => setActiveSubTab("ledger")}
+// // //         >
+// // //           <Text
+// // //             style={[
+// // //               styles.tabText,
+// // //               activeSubTab === "ledger"
+// // //                 ? { color: theme.accent, fontWeight: "bold" }
+// // //                 : { color: theme.subText },
+// // //             ]}
+// // //           >
+// // //             🧾 Expense Ledger ({receipts.length})
+// // //           </Text>
+// // //         </TouchableOpacity>
+// // //         <TouchableOpacity
+// // //           style={[
+// // //             styles.tabItem,
+// // //             activeSubTab === "overview" && {
+// // //               borderBottomColor: theme.accent,
+// // //               borderBottomWidth: 2,
+// // //             },
+// // //           ]}
+// // //           onPress={() => setActiveSubTab("overview")}
+// // //         >
+// // //           <Text
+// // //             style={[
+// // //               styles.tabText,
+// // //               activeSubTab === "overview"
+// // //                 ? { color: theme.accent, fontWeight: "bold" }
+// // //                 : { color: theme.subText },
+// // //             ]}
+// // //           >
+// // //             📋 Overview & Specialties
+// // //           </Text>
+// // //         </TouchableOpacity>
+// // //       </View>
+
+// // //       <ScrollView contentContainerStyle={{ padding: 16 }}>
+// // //         {/* TAB 1: LEDGER & RECEIPTS */}
+// // //         {activeSubTab === "ledger" && (
+// // //           <View>
+// // //             {/* Balance Summary Banner */}
+// // //             <View
+// // //               style={[
+// // //                 styles.balanceBanner,
+// // //                 { backgroundColor: theme.cardBg, borderColor: theme.border },
+// // //               ]}
+// // //             >
+// // //               <Text style={[styles.bannerLabel, { color: theme.subText }]}>
+// // //                 Outstanding Balance Owed to Supplier:
+// // //               </Text>
+// // //               <Text
+// // //                 style={[
+// // //                   styles.bannerAmount,
+// // //                   { color: calculateTotalOwed() > 0 ? "#ef4444" : "#10b981" },
+// // //                 ]}
+// // //               >
+// // //                 {calculateTotalOwed().toFixed(2)} TND
+// // //               </Text>
+// // //             </View>
+
+// // //             <TouchableOpacity
+// // //               style={[styles.addJobBtn, { backgroundColor: theme.accent }]}
+// // //               onPress={() => setShowReceiptModal(true)}
+// // //             >
+// // //               <Ionicons name="receipt" size={20} color="#fff" />
+// // //               <Text style={[styles.addJobBtnText, { color: "#fff" }]}>
+// // //                 Log New Supplier Receipt / Invoice
+// // //               </Text>
+// // //             </TouchableOpacity>
+
+// // //             {loadingReceipts ? (
+// // //               <ActivityIndicator
+// // //                 size="large"
+// // //                 color={theme.accent}
+// // //                 style={{ marginTop: 20 }}
+// // //               />
+// // //             ) : receipts.length === 0 ? (
+// // //               <Text style={[styles.emptyText, { color: theme.subText }]}>
+// // //                 No receipts logged for this supplier yet.
+// // //               </Text>
+// // //             ) : (
+// // //               receipts.map((rec) => (
+// // //                 <View
+// // //                   key={rec.id}
+// // //                   style={[
+// // //                     styles.jobCard,
+// // //                     {
+// // //                       backgroundColor: theme.cardBg,
+// // //                       borderColor: theme.border,
+// // //                     },
+// // //                   ]}
+// // //                 >
+// // //                   <View style={styles.jobCardHeader}>
+// // //                     <Text style={[styles.jobTitle, { color: theme.text }]}>
+// // //                       Receipt #{rec.receiptNumber}
+// // //                     </Text>
+// // //                     <Text style={[styles.jobDate, { color: theme.accent }]}>
+// // //                       📅 {rec.date}
+// // //                     </Text>
+// // //                   </View>
+// // //                   <Text style={[styles.infoText, { color: theme.subText }]}>
+// // //                     🏷️ Category: {rec.category}
+// // //                   </Text>
+// // //                   {rec.notes ? (
+// // //                     <Text style={[styles.infoText, { color: theme.text }]}>
+// // //                       💬 Notes: {rec.notes}
+// // //                     </Text>
+// // //                   ) : null}
+
+// // //                   <View
+// // //                     style={[styles.jobFooter, { borderTopColor: theme.border }]}
+// // //                   >
+// // //                     <Text
+// // //                       style={{
+// // //                         color: rec.status === "Pending" ? "#ef4444" : "#10b981",
+// // //                         fontWeight: "bold",
+// // //                       }}
+// // //                     >
+// // //                       Status: {rec.status}
+// // //                     </Text>
+// // //                     <Text style={[styles.jobTotalText, { color: theme.text }]}>
+// // //                       Amount: {rec.amount} TND
+// // //                     </Text>
+// // //                   </View>
+// // //                 </View>
+// // //               ))
+// // //             )}
+// // //           </View>
+// // //         )}
+
+// // //         {/* TAB 2: OVERVIEW & SPECIALTIES */}
+// // //         {activeSubTab === "overview" && (
+// // //           <View>
+// // //             <View
+// // //               style={[
+// // //                 styles.infoCard,
+// // //                 { backgroundColor: theme.cardBg, borderColor: theme.border },
+// // //               ]}
+// // //             >
+// // //               <Text style={[styles.cardTitle, { color: theme.text }]}>
+// // //                 Supplier Details
+// // //               </Text>
+// // //               <Text style={[styles.infoText, { color: theme.text }]}>
+// // //                 📞 Phone: {supplier?.phone}
+// // //               </Text>
+// // //               <Text style={[styles.infoText, { color: theme.text }]}>
+// // //                 📍 Address: {supplier?.address || "Not specified"}
+// // //               </Text>
+// // //             </View>
+
+// // //             <View
+// // //               style={[
+// // //                 styles.infoCard,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   borderColor: theme.border,
+// // //                   marginTop: 12,
+// // //                 },
+// // //               ]}
+// // //             >
+// // //               <Text style={[styles.cardTitle, { color: theme.text }]}>
+// // //                 Specialty Materials Supplied
+// // //               </Text>
+// // //               <View style={styles.chipRow}>
+// // //                 {supplier?.specialties ? (
+// // //                   Array.isArray(supplier.specialties) ? (
+// // //                     supplier.specialties.map((spec, i) => (
+// // //                       <View
+// // //                         key={i}
+// // //                         style={[
+// // //                           styles.specChip,
+// // //                           {
+// // //                             backgroundColor: theme.inputBg,
+// // //                             borderColor: theme.border,
+// // //                           },
+// // //                         ]}
+// // //                       >
+// // //                         <Text
+// // //                           style={{
+// // //                             color: theme.text,
+// // //                             fontSize: 13,
+// // //                             fontWeight: "600",
+// // //                           }}
+// // //                         >
+// // //                           ⚡ {spec}
+// // //                         </Text>
+// // //                       </View>
+// // //                     ))
+// // //                   ) : (
+// // //                     <Text style={[styles.infoText, { color: theme.text }]}>
+// // //                       {supplier.specialties}
+// // //                     </Text>
+// // //                   )
+// // //                 ) : (
+// // //                   <Text style={[styles.infoText, { color: theme.subText }]}>
+// // //                     No specialties listed.
+// // //                   </Text>
+// // //                 )}
+// // //               </View>
+// // //             </View>
+// // //           </View>
+// // //         )}
+// // //       </ScrollView>
+
+// // //       {/* EDIT SUPPLIER MODAL */}
+// // //       <Modal
+// // //         animationType="slide"
+// // //         transparent={true}
+// // //         visible={showEditModal}
+// // //         onRequestClose={() => setShowEditModal(false)}
+// // //       >
+// // //         <SafeAreaView
+// // //           style={[styles.modalOverlay, { backgroundColor: theme.background }]}
+// // //         >
+// // //           <ScrollView contentContainerStyle={{ padding: 20 }}>
+// // //             <View style={styles.modalHeaderRow}>
+// // //               <Text style={[styles.modalTitle, { color: theme.text }]}>
+// // //                 Update Supplier Info
+// // //               </Text>
+// // //               <TouchableOpacity onPress={() => setShowEditModal(false)}>
+// // //                 <Ionicons name="close-circle" size={28} color={theme.subText} />
+// // //               </TouchableOpacity>
+// // //             </View>
+
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="Company / Supplier Name"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={editName}
+// // //               onChangeText={setEditName}
+// // //             />
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="Phone Number"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={editPhone}
+// // //               onChangeText={setEditPhone}
+// // //               keyboardType="phone-pad"
+// // //             />
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="Address / Warehouse Location"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={editAddress}
+// // //               onChangeText={setEditAddress}
+// // //             />
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="Specialties (comma separated)"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={specialties}
+// // //               onChangeText={setSpecialties}
+// // //             />
+
+// // //             <TouchableOpacity
+// // //               style={[
+// // //                 styles.saveJobBtn,
+// // //                 { backgroundColor: theme.accent, marginTop: 20 },
+// // //               ]}
+// // //               onPress={handleSaveSupplierInfo}
+// // //               disabled={savingEdit}
+// // //             >
+// // //               {savingEdit ? (
+// // //                 <ActivityIndicator color="#fff" />
+// // //               ) : (
+// // //                 <Text style={styles.saveJobBtnText}>Save Updates</Text>
+// // //               )}
+// // //             </TouchableOpacity>
+// // //           </ScrollView>
+// // //         </SafeAreaView>
+// // //       </Modal>
+
+// // //       {/* LOG SUPPLIER RECEIPT MODAL */}
+// // //       <Modal
+// // //         animationType="slide"
+// // //         transparent={true}
+// // //         visible={showReceiptModal}
+// // //         onRequestClose={() => setShowReceiptModal(false)}
+// // //       >
+// // //         <SafeAreaView
+// // //           style={[styles.modalOverlay, { backgroundColor: theme.background }]}
+// // //         >
+// // //           <ScrollView contentContainerStyle={{ padding: 20 }}>
+// // //             <View style={styles.modalHeaderRow}>
+// // //               <Text style={[styles.modalTitle, { color: theme.text }]}>
+// // //                 📷 Scan / Log Supplier Receipt
+// // //               </Text>
+// // //               <TouchableOpacity onPress={() => setShowReceiptModal(false)}>
+// // //                 <Ionicons name="close-circle" size={28} color={theme.subText} />
+// // //               </TouchableOpacity>
+// // //             </View>
+
+// // //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// // //               Receipt / Invoice Number
+// // //             </Text>
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="e.g. REC-9921"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={receiptNumber}
+// // //               onChangeText={setReceiptNumber}
+// // //             />
+
+// // //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// // //               Total Amount (TND)
+// // //             </Text>
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="0.00"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               keyboardType="numeric"
+// // //               value={receiptAmount}
+// // //               onChangeText={setReceiptAmount}
+// // //             />
+
+// // //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// // //               Receipt Date
+// // //             </Text>
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                 },
+// // //               ]}
+// // //               placeholder="YYYY-MM-DD"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               value={receiptDate}
+// // //               onChangeText={setReceiptDate}
+// // //             />
+
+// // //             <Text style={[styles.fieldLabel, { color: theme.subText }]}>
+// // //               Category
+// // //             </Text>
+// // //             <View style={styles.chipRow}>
+// // //               {[
+// // //                 "Parts Stock",
+// // //                 "Tools & Equipment",
+// // //                 "Cables & Wiring",
+// // //                 "Solar",
+// // //               ].map((cat) => (
+// // //                 <TouchableOpacity
+// // //                   key={cat}
+// // //                   style={[
+// // //                     styles.chip,
+// // //                     receiptCategory === cat
+// // //                       ? { backgroundColor: theme.accent }
+// // //                       : {
+// // //                           backgroundColor: theme.cardBg,
+// // //                           borderColor: theme.border,
+// // //                           borderWidth: 1,
+// // //                         },
+// // //                   ]}
+// // //                   onPress={() => setReceiptCategory(cat)}
+// // //                 >
+// // //                   <Text
+// // //                     style={{
+// // //                       color: receiptCategory === cat ? "#fff" : theme.text,
+// // //                       fontSize: 13,
+// // //                       fontWeight: "bold",
+// // //                     }}
+// // //                   >
+// // //                     {cat}
+// // //                   </Text>
+// // //                 </TouchableOpacity>
+// // //               ))}
+// // //             </View>
+
+// // //             <Text
+// // //               style={[
+// // //                 styles.fieldLabel,
+// // //                 { color: theme.subText, marginTop: 10 },
+// // //               ]}
+// // //             >
+// // //               Notes / Parts Purchased
+// // //             </Text>
+// // //             <TextInput
+// // //               style={[
+// // //                 styles.input,
+// // //                 {
+// // //                   backgroundColor: theme.cardBg,
+// // //                   color: theme.text,
+// // //                   borderColor: theme.border,
+// // //                   height: 70,
+// // //                 },
+// // //               ]}
+// // //               placeholder="e.g. 5x Circuit Breakers 32A"
+// // //               placeholderTextColor={theme.placeholder}
+// // //               multiline
+// // //               value={receiptNotes}
+// // //               onChangeText={setReceiptNotes}
+// // //             />
+
+// // //             <TouchableOpacity
+// // //               style={[
+// // //                 styles.saveJobBtn,
+// // //                 { backgroundColor: theme.accent, marginTop: 20 },
+// // //               ]}
+// // //               onPress={handleSaveReceipt}
+// // //             >
+// // //               <Text style={styles.saveJobBtnText}>Save to Supplier Ledger</Text>
+// // //             </TouchableOpacity>
+// // //           </ScrollView>
+// // //         </SafeAreaView>
+// // //       </Modal>
+// // //     </SafeAreaView>
+// // //   );
+// // // }
+
+// // // const styles = StyleSheet.create({
+// // //   container: { flex: 1 },
+// // //   header: {
+// // //     flexDirection: "row",
+// // //     alignItems: "center",
+// // //     padding: 14,
+// // //     borderWidth: 1,
+// // //   },
+// // //   backBtn: { padding: 4 },
+// // //   editHeaderBtn: {
+// // //     flexDirection: "row",
+// // //     alignItems: "center",
+// // //     paddingHorizontal: 10,
+// // //     paddingVertical: 6,
+// // //     borderRadius: 6,
+// // //     gap: 4,
+// // //   },
+// // //   editBtnText: { color: "#fff", fontSize: 12, fontWeight: "bold" },
+// // //   clientNameHeader: { fontSize: 18, fontWeight: "bold" },
+// // //   clientSubHeader: { fontSize: 12 },
+// // //   contactRow: { flexDirection: "row", padding: 12, borderWidth: 1, gap: 8 },
+// // //   contactBtn: {
+// // //     flex: 1,
+// // //     flexDirection: "row",
+// // //     justifyContent: "center",
+// // //     alignItems: "center",
+// // //     paddingVertical: 10,
+// // //     borderRadius: 8,
+// // //     gap: 6,
+// // //   },
+// // //   contactBtnText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
+// // //   tabBar: { flexDirection: "row", borderWidth: 1 },
+// // //   tabItem: { flex: 1, paddingVertical: 12, alignItems: "center" },
+// // //   tabText: { fontSize: 13 },
+// // //   balanceBanner: {
+// // //     padding: 16,
+// // //     borderRadius: 12,
+// // //     borderWidth: 1,
+// // //     marginBottom: 16,
+// // //     alignItems: "center",
+// // //   },
+// // //   bannerLabel: { fontSize: 13, fontWeight: "bold" },
+// // //   bannerAmount: { fontSize: 26, fontWeight: "bold", marginTop: 4 },
+// // //   infoCard: { padding: 16, borderRadius: 12, borderWidth: 1 },
+// // //   cardTitle: { fontSize: 16, fontWeight: "bold", marginBottom: 10 },
+// // //   infoText: { fontSize: 14, marginBottom: 6 },
+// // //   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 },
+// // //   specChip: {
+// // //     paddingHorizontal: 12,
+// // //     paddingVertical: 6,
+// // //     borderRadius: 8,
+// // //     borderWidth: 1,
+// // //   },
+// // //   addJobBtn: {
+// // //     flexDirection: "row",
+// // //     alignItems: "center",
+// // //     justifyContent: "center",
+// // //     padding: 12,
+// // //     borderRadius: 10,
+// // //     marginBottom: 16,
+// // //     gap: 6,
+// // //   },
+// // //   addJobBtnText: { fontWeight: "bold", fontSize: 14 },
+// // //   emptyText: { textAlign: "center", fontStyle: "italic", marginTop: 20 },
+// // //   jobCard: { padding: 14, borderRadius: 12, borderWidth: 1, marginBottom: 12 },
+// // //   jobCardHeader: {
+// // //     flexDirection: "row",
+// // //     justifyContent: "space-between",
+// // //     alignItems: "center",
+// // //     marginBottom: 6,
+// // //   },
+// // //   jobTitle: { fontSize: 15, fontWeight: "bold" },
+// // //   jobDate: { fontSize: 12, fontWeight: "bold" },
+// // //   jobFooter: {
+// // //     flexDirection: "row",
+// // //     justifyContent: "space-between",
+// // //     paddingTop: 8,
+// // //     marginTop: 8,
+// // //     borderTopWidth: 1,
+// // //     alignItems: "center",
+// // //   },
+// // //   jobTotalText: { fontSize: 14, fontWeight: "bold" },
+// // //   modalOverlay: { flex: 1 },
+// // //   modalHeaderRow: {
+// // //     flexDirection: "row",
+// // //     justifyContent: "space-between",
+// // //     alignItems: "center",
+// // //     marginBottom: 16,
+// // //   },
+// // //   modalTitle: { fontSize: 18, fontWeight: "bold" },
+// // //   fieldLabel: {
+// // //     fontSize: 12,
+// // //     fontWeight: "bold",
+// // //     marginBottom: 4,
+// // //     marginTop: 8,
+// // //   },
+// // //   input: {
+// // //     paddingHorizontal: 12,
+// // //     paddingVertical: 10,
+// // //     borderRadius: 8,
+// // //     marginBottom: 10,
+// // //     fontSize: 14,
+// // //     borderWidth: 1,
+// // //   },
+// // //   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+// // //   saveJobBtn: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+// // //   saveJobBtnText: { color: "#fff", fontWeight: "bold", fontSize: 15 },
+// // // });
